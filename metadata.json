@@ -1,0 +1,8 @@
+{
+  "name": "GeoApex - Clone GeoGuessr Multijoueur 3D & Street View",
+  "description": "Clone GeoGuessr nouvelle génération avec Google Street View 360°, globe terrestre 3D interactif Three.js, et modes compétitifs en temps réel (Duels 1v1 avec barre de PV, Classique 5 rounds, Country Streak et Blitz 30s).",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
