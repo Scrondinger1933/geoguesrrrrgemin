@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import confetti from 'canvas-confetti';
-import { ArrowRight, ShieldAlert, Award, Sparkles, Map as MapIcon, Globe } from 'lucide-react';
+import { ArrowRight, ShieldAlert, Award, Sparkles, Map as MapIcon, Globe, Zap, Flame } from 'lucide-react';
 import { RoundResultData } from '../game/multiplayer';
 import { formatDistance } from '../game/rules';
 import { EarthGlobe } from './EarthGlobe';
@@ -35,6 +35,10 @@ export function RoundResult({
     damageDealt = 0,
     damagedTarget = 'tie',
     damageMultiplier = 1.0,
+    speedBonus = 0,
+    comboMultiplier = 1.0,
+    comboStreak = 0,
+    timeSeconds = 0,
   } = data;
 
   // View toggle: default to detailed geographic map matching OpenGuessr (image_24da0ebb.png)
@@ -120,11 +124,27 @@ export function RoundResult({
               </button>
             </div>
 
-            <div className="text-right">
+            <div className="text-right flex flex-col items-end">
               <span className="text-[10px] uppercase tracking-wider text-slate-400 block font-bold">Score Manche</span>
               <span className="text-xl sm:text-2xl font-black text-amber-400 font-mono-numbers">
                 +{playerScore.toLocaleString('fr-FR')} <span className="text-xs text-amber-300">pts</span>
               </span>
+              {(speedBonus > 0 || comboMultiplier > 1) && (
+                <div className="flex items-center gap-1.5 mt-1 flex-wrap justify-end">
+                  {speedBonus > 0 && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      <Zap className="w-2.5 h-2.5 text-amber-400" />
+                      <span>+{speedBonus} Vitesse ({timeSeconds}s)</span>
+                    </span>
+                  )}
+                  {comboMultiplier > 1 && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                      <Flame className="w-2.5 h-2.5 text-purple-400" />
+                      <span>Combo x{comboMultiplier.toFixed(2)} ({comboStreak})</span>
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>

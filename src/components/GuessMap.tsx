@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import L from 'leaflet';
-import { Maximize2, Minimize2, MapPin, Send, Layers, Navigation } from 'lucide-react';
+import { Maximize2, Minimize2, MapPin, Send, Navigation, Expand, Shrink, Compass, Search } from 'lucide-react';
 import { LatLng } from '../game/rules';
 import { sound } from '../utils/audio';
 
@@ -30,50 +30,93 @@ const createOpenGuessrPinIcon = () => {
 };
 
 type MapLayerType = 'osm' | 'esri' | 'satellite';
+type MapSizeState = 'compact' | 'expanded' | 'fullscreen';
 
-export function GuessMap({
-  onGuessSubmit,
-  disabled = false,
-}: GuessMapProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+const QUICK_REGIONS = [
+  { name: 'Europe', coords: [48, 15] as [number, number], zoom: 4 },
+  { name: 'Am. Nord', coords: [42, -98] as [number, number], zoom: 3 },
+  { name: 'Am. Sud', coords: [-15, -60] as [number, number], zoom: 3 },
+  { name: 'Asie', coords: [35, 105] as [number, number], zoom: 3 },
+  { name: 'Afrique', coords: [5, 20] as [number, number], zoom: 3 },
+  { name: 'Océanie', coords: [-25, 135] as [number, number], zoom: 4 },
+];
+
+export function GuessMap({ onGuessSubmit, disabled = false }: GuessMapProps) {
+  const [sizeState, setSizeState] = useState<MapSizeState>('compact');
   const [selectedPoint, setSelectedPoint] = useState<LatLng | null>(null);
   const [layerType, setLayerType] = useState<MapLayerType>('osm');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
+  const circleLayersRef = useRef<L.Circle[]>([]);
   const activeTileLayerRef = useRef<L.TileLayer | null>(null);
+
+  // Clear radius measurement circles
+  const clearCircles = useCallback(() => {
+    if (mapInstanceRef.current) {
+      circleLayersRef.current.forEach((c) => mapInstanceRef.current?.removeLayer(c));
+    }
+    circleLayersRef.current = [];
+  }, []);
+
+  // Update distance measurement circles around pin
+  const updateCircles = useCallback(
+    (lat: number, lng: number) => {
+      const map = mapInstanceRef.current;
+      if (!map) return;
+      clearCircles();
+
+      // 500 km radius
+      const c1 = L.circle([lat, lng], {
+        radius: 500000,
+        color: '#ef4444',
+        weight: 1.5,
+        dashArray: '5, 5',
+        fill: true,
+        fillColor: '#ef4444',
+        fillOpacity: 0.04,
+      }).addTo(map);
+
+      // 1500 km radius
+      const c2 = L.circle([lat, lng], {
+        radius: 1500000,
+        color: '#38bdf8',
+        weight: 1.2,
+        dashArray: '6, 6',
+        fill: false,
+      }).addTo(map);
+
+      circleLayersRef.current = [c1, c2];
+    },
+    [clearCircles]
+  );
 
   // Initialize Leaflet Map
   useEffect(() => {
     if (!mapContainerRef.current) return;
     if (mapInstanceRef.current) return;
 
-    // Create Leaflet map centered at Europe/Atlantic view
     const map = L.map(mapContainerRef.current, {
       center: [25, 10],
       zoom: 2,
       minZoom: 1,
       maxZoom: 18,
-      zoomControl: false, // We'll add custom positioned zoom control
+      zoomControl: false,
       attributionControl: true,
       worldCopyJump: true,
     });
 
-    // Default OpenStreetMap high-detail tiles (real geographic map, no quota, no API key required)
-    const osmTiles = L.tileLayer(
-      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        subdomains: ['a', 'b', 'c'],
-        maxZoom: 19,
-      }
-    );
+    const osmTiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      subdomains: ['a', 'b', 'c'],
+      maxZoom: 19,
+    });
 
     osmTiles.addTo(map);
     activeTileLayerRef.current = osmTiles;
 
-    // Add compact zoom control at bottom-left to leave room for the big Guess button
     L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
     // Map click handler to drop/move pin
@@ -83,6 +126,7 @@ export function GuessMap({
 
       sound.playPinDrop();
       setSelectedPoint({ lat, lng });
+      updateCircles(lat, lng);
 
       if (markerRef.current) {
         markerRef.current.setLatLng([lat, lng]);
@@ -92,13 +136,20 @@ export function GuessMap({
           draggable: true,
         }).addTo(map);
 
+        marker.on('drag', () => {
+          const pos = marker.getLatLng();
+          updateCircles(pos.lat, pos.lng);
+        });
+
         marker.on('dragend', () => {
           const pos = marker.getLatLng();
           sound.playPinDrop();
-          setSelectedPoint({
+          const newPt = {
             lat: Math.round(pos.lat * 1000) / 1000,
             lng: Math.round(pos.lng * 1000) / 1000,
-          });
+          };
+          setSelectedPoint(newPt);
+          updateCircles(newPt.lat, newPt.lng);
         });
 
         markerRef.current = marker;
@@ -108,11 +159,12 @@ export function GuessMap({
     mapInstanceRef.current = map;
 
     return () => {
+      clearCircles();
       map.remove();
       mapInstanceRef.current = null;
       markerRef.current = null;
     };
-  }, []);
+  }, [clearCircles, updateCircles]);
 
   // Switch map tile layer
   const switchLayer = (type: MapLayerType) => {
@@ -146,7 +198,15 @@ export function GuessMap({
     sound.playClick();
   };
 
-  // Auto-resize Leaflet map smoothly whenever container bounds change
+  // Fly to region preset
+  const handleFlyTo = (coords: [number, number], zoom: number) => {
+    sound.playClick();
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.flyTo(coords, zoom, { duration: 1.2 });
+    }
+  };
+
+  // ResizeObserver for instant tile adjustment
   useEffect(() => {
     if (!mapContainerRef.current) return;
     const observer = new ResizeObserver(() => {
@@ -155,22 +215,18 @@ export function GuessMap({
       }
     });
     observer.observe(mapContainerRef.current);
-
     return () => observer.disconnect();
   }, []);
 
-  // Also trigger invalidateSize on state toggle
+  // Update map layout on sizeState change
   useEffect(() => {
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.invalidateSize();
-    }
     const timer = setTimeout(() => {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.invalidateSize();
       }
-    }, 150);
+    }, 120);
     return () => clearTimeout(timer);
-  }, [isExpanded]);
+  }, [sizeState]);
 
   // Submit guess
   const handleSubmit = useCallback(() => {
@@ -178,48 +234,77 @@ export function GuessMap({
     sound.playGuessSubmit();
     onGuessSubmit(selectedPoint);
 
-    // Remove marker after guess
     if (markerRef.current && mapInstanceRef.current) {
       mapInstanceRef.current.removeLayer(markerRef.current);
       markerRef.current = null;
     }
+    clearCircles();
     setSelectedPoint(null);
-  }, [selectedPoint, disabled, onGuessSubmit]);
+  }, [selectedPoint, disabled, onGuessSubmit, clearCircles]);
 
-  // Spacebar keyboard shortcut to validate guess
+  // Keyboard shortcuts: Space to guess, F for fullscreen toggle
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.code === 'Space' && selectedPoint && !disabled) {
         e.preventDefault();
         handleSubmit();
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        sound.playClick();
+        setSizeState((prev) => (prev === 'fullscreen' ? 'expanded' : 'fullscreen'));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedPoint, disabled, handleSubmit]);
 
+  const isFullscreen = sizeState === 'fullscreen';
+
   return (
     <div
-      onMouseEnter={() => setIsExpanded(true)}
-      onMouseLeave={() => setIsExpanded(false)}
-      className={`absolute bottom-5 right-5 z-30 transition-all duration-300 ease-out origin-bottom-right rounded-2xl overflow-hidden shadow-2xl border border-slate-700/80 bg-slate-900/95 backdrop-blur-md flex flex-col ${
-        isExpanded
-          ? 'w-[480px] h-[360px] sm:w-[620px] sm:h-[450px] scale-100'
-          : 'w-[320px] h-[220px] opacity-95 hover:opacity-100 scale-95'
+      onMouseEnter={() => {
+        if (sizeState === 'compact') setSizeState('expanded');
+      }}
+      onMouseLeave={() => {
+        if (sizeState === 'expanded') setSizeState('compact');
+      }}
+      className={`fixed z-30 transition-all duration-300 ease-out origin-bottom-right rounded-2xl overflow-hidden shadow-2xl border border-slate-700/80 bg-slate-900/95 backdrop-blur-md flex flex-col ${
+        isFullscreen
+          ? 'inset-4 sm:inset-8 w-auto h-auto scale-100'
+          : sizeState === 'expanded'
+          ? 'bottom-5 right-5 w-[480px] h-[360px] sm:w-[640px] sm:h-[460px] scale-100'
+          : 'bottom-5 right-5 w-[320px] h-[220px] opacity-95 hover:opacity-100 scale-95'
       }`}
     >
-      {/* Top Map Bar with OpenGuessr-style controls */}
-      <div className="px-3.5 py-2 bg-slate-900/95 border-b border-slate-800 flex items-center justify-between text-xs text-slate-300 select-none z-10">
-        <div className="flex items-center gap-2 font-bold">
+      {/* Top Map Bar with OpenGuessr-style controls & Quick Jump bar */}
+      <div className="px-3 py-2 bg-slate-900/95 border-b border-slate-800 flex items-center justify-between text-xs text-slate-300 select-none z-10 gap-2">
+        <div className="flex items-center gap-2 font-bold shrink-0">
           <MapPin className="w-4 h-4 text-red-500 fill-red-500/20" />
-          <span className="text-white tracking-wide">Carte du Monde</span>
-          <span className="text-[10px] text-emerald-400 bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 rounded-full font-semibold">
-            Haute Définition
-          </span>
+          <span className="text-white tracking-wide">Carte Tactique</span>
+          {selectedPoint && (
+            <span className="text-[10px] text-cyan-300 font-mono bg-cyan-500/10 border border-cyan-500/30 px-1.5 py-0.5 rounded">
+              Rayons 500 & 1500 km
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center gap-1.5">
+        {/* Quick Region Jump Buttons (Visible when expanded or fullscreen) */}
+        {sizeState !== 'compact' && (
+          <div className="hidden sm:flex items-center gap-1 text-[10px]">
+            {QUICK_REGIONS.map((reg) => (
+              <button
+                key={reg.name}
+                onClick={() => handleFlyTo(reg.coords, reg.zoom)}
+                className="px-1.5 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              >
+                {reg.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center gap-1.5 shrink-0">
           {/* Layer switcher pill */}
           <div className="flex items-center bg-slate-800 rounded-lg p-0.5 border border-slate-700/60 text-[10px]">
             <button
@@ -248,43 +333,42 @@ export function GuessMap({
             </button>
           </div>
 
-          {/* Expand/Collapse Toggle */}
+          {/* Fullscreen Toggle [F] */}
           <button
-            onClick={() => setIsExpanded(!isExpanded)}
-            title={isExpanded ? 'Réduire' : 'Agrandir la carte'}
+            onClick={() => {
+              sound.playClick();
+              setSizeState((prev) => (prev === 'fullscreen' ? 'expanded' : 'fullscreen'));
+            }}
+            title={isFullscreen ? 'Quitter Plein Écran [F]' : 'Carte Plein Écran [F]'}
             className="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
           >
-            {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            {isFullscreen ? <Shrink className="w-4 h-4 text-cyan-400" /> : <Expand className="w-4 h-4" />}
           </button>
         </div>
       </div>
 
       {/* Real High-Detail Interactive Geographic Map Container */}
       <div className="relative flex-1 w-full h-full bg-[#a5bfdd] overflow-hidden">
-        <div
-          ref={mapContainerRef}
-          className="w-full h-full cursor-crosshair"
-          data-testid="leaflet-guess-map"
-        />
+        <div ref={mapContainerRef} className="w-full h-full cursor-crosshair" data-testid="leaflet-guess-map" />
 
         {/* Prompt overlay when no pin is placed */}
         {!selectedPoint && (
           <div className="absolute top-2.5 inset-x-2 text-center pointer-events-none z-[400]">
             <span className="bg-slate-900/90 text-cyan-300 border border-cyan-500/40 text-[11px] font-semibold px-3 py-1 rounded-full shadow-lg backdrop-blur-md">
-              Cliquez sur la carte pour placer votre repère
+              Cliquez pour placer votre repère (Raccourci [F] : Plein Écran)
             </span>
           </div>
         )}
       </div>
 
-      {/* Bottom Bar: Matching OpenGuessr (image_f6366ad4.png) with big Red Guess Button */}
+      {/* Bottom Bar: Coordinates, Scale & Big Red Guess Button */}
       <div className="p-3 bg-slate-900/95 border-t border-slate-800 flex items-center justify-between gap-3 z-10">
-        <div className="text-xs text-slate-300">
+        <div className="text-xs text-slate-300 flex items-center gap-3">
           {selectedPoint ? (
-            <div className="flex items-center gap-1.5 font-mono text-[11px] text-cyan-300">
+            <div className="flex items-center gap-2 font-mono text-[11px] text-cyan-300">
               <Navigation className="w-3.5 h-3.5 text-red-400" />
               <span>
-                {selectedPoint.lat > 0 ? `${selectedPoint.lat.toFixed(2)}°N` : `${Math.abs(selectedPoint.lat).toFixed(2)}°S`}, {' '}
+                {selectedPoint.lat > 0 ? `${selectedPoint.lat.toFixed(2)}°N` : `${Math.abs(selectedPoint.lat).toFixed(2)}°S`},{' '}
                 {selectedPoint.lng > 0 ? `${selectedPoint.lng.toFixed(2)}°E` : `${Math.abs(selectedPoint.lng).toFixed(2)}°O`}
               </span>
             </div>
@@ -293,7 +377,7 @@ export function GuessMap({
           )}
         </div>
 
-        {/* Big Red "DEVINER / GUESS" Button identical to OpenGuessr in image_f6366ad4.png */}
+        {/* Big Red "DEVINER / GUESS" Button */}
         <button
           onClick={handleSubmit}
           disabled={!selectedPoint || disabled}

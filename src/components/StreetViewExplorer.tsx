@@ -1,5 +1,22 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Compass, RotateCcw, ZoomIn, ZoomOut, Dices, HelpCircle, Eye, EyeOff, Sparkles, Navigation } from 'lucide-react';
+import {
+  Compass,
+  RotateCcw,
+  ZoomIn,
+  ZoomOut,
+  Dices,
+  HelpCircle,
+  Eye,
+  EyeOff,
+  Sparkles,
+  Navigation,
+  ChevronUp,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Move,
+  Wind,
+} from 'lucide-react';
 import { GeoLocation } from '../game/locations';
 import { sound } from '../utils/audio';
 
@@ -27,6 +44,14 @@ export function StreetViewExplorer({
   const [showClue, setShowClue] = useState(false);
   const [isUsingGooglePano, setIsUsingGooglePano] = useState(false);
   const [isTeleporting, setIsTeleporting] = useState(false);
+  const [isAmbienceOn, setIsAmbienceOn] = useState(false);
+  const [isStepping, setIsStepping] = useState(false);
+
+  // Toggle ambient wind audio
+  const handleToggleAmbience = () => {
+    const active = sound.toggleAmbience();
+    setIsAmbienceOn(active);
+  };
 
   // Drag state for canvas fallback
   const isDragging = useRef(false);
@@ -79,6 +104,90 @@ export function StreetViewExplorer({
       setFov((prev) => Math.max(40, Math.min(110, prev + delta)));
     }
   }, []);
+
+  // Move Forward along current road heading
+  const moveForward = useCallback(() => {
+    sound.playStep();
+    setIsStepping(true);
+    setTimeout(() => setIsStepping(false), 240);
+
+    if (googlePanoRef.current && isUsingGooglePano) {
+      const pano = googlePanoRef.current;
+      const links = pano.getLinks() || [];
+      if (links.length > 0) {
+        let bestLink = links[0];
+        let minDiff = 360;
+        links.forEach((l) => {
+          if (l.heading !== null && l.heading !== undefined) {
+            const diff = Math.abs(((l.heading - heading + 180 + 360) % 360) - 180);
+            if (diff < minDiff) {
+              minDiff = diff;
+              bestLink = l;
+            }
+          }
+        });
+        if (bestLink.pano) {
+          pano.setPano(bestLink.pano);
+          return;
+        }
+      }
+    }
+
+    setStepOffset((prev) => prev + 1);
+    const rad = (heading * Math.PI) / 180;
+    const stepMeters = 25;
+    const dLat = (Math.cos(rad) * stepMeters) / 111320;
+    const dLng = (Math.sin(rad) * stepMeters) / (111320 * Math.cos((location.lat * Math.PI) / 180));
+    if (onLocationUpdate) {
+      onLocationUpdate(location.lat + dLat, location.lng + dLng);
+    }
+    if (googlePanoRef.current) {
+      try {
+        googlePanoRef.current.setPosition({ lat: location.lat + dLat, lng: location.lng + dLng });
+      } catch {}
+    }
+  }, [heading, location.lat, location.lng, isUsingGooglePano, onLocationUpdate]);
+
+  // Move Backward along current road heading
+  const moveBackward = useCallback(() => {
+    sound.playStep();
+    setIsStepping(true);
+    setTimeout(() => setIsStepping(false), 240);
+    setStepOffset((prev) => prev - 1);
+    const rad = ((heading + 180) * Math.PI) / 180;
+    const stepMeters = 20;
+    const dLat = (Math.cos(rad) * stepMeters) / 111320;
+    const dLng = (Math.sin(rad) * stepMeters) / (111320 * Math.cos((location.lat * Math.PI) / 180));
+    if (onLocationUpdate) {
+      onLocationUpdate(location.lat + dLat, location.lng + dLng);
+    }
+    if (googlePanoRef.current) {
+      try {
+        googlePanoRef.current.setPosition({ lat: location.lat + dLat, lng: location.lng + dLng });
+      } catch {}
+    }
+  }, [heading, location.lat, location.lng, onLocationUpdate]);
+
+  // Turn Left / Right
+  const turnLeft = useCallback((deg = 30) => {
+    sound.playClick();
+    const newHeading = (heading - deg + 360) % 360;
+    setHeading(newHeading);
+    if (googlePanoRef.current) {
+      const p = googlePanoRef.current.getPov();
+      googlePanoRef.current.setPov({ heading: newHeading, pitch: p.pitch });
+    }
+  }, [heading]);
+
+  const turnRight = useCallback((deg = 30) => {
+    sound.playClick();
+    const newHeading = (heading + deg) % 360;
+    setHeading(newHeading);
+    if (googlePanoRef.current) {
+      const p = googlePanoRef.current.getPov();
+      googlePanoRef.current.setPov({ heading: newHeading, pitch: p.pitch });
+    }
+  }, [heading]);
 
   // 1. Mount StreetViewPanorama ONCE when Google Maps API is available
   useEffect(() => {
@@ -377,12 +486,24 @@ export function StreetViewExplorer({
     } catch {}
   };
 
-  // Keyboard navigation shortcuts
+  // Keyboard navigation shortcuts (Arrow keys & WASD / ZQSD for movement)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-      if (e.key === 'r' || e.key === 'R') {
+      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W' || e.key === 'z' || e.key === 'Z') {
+        e.preventDefault();
+        moveForward();
+      } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        moveBackward();
+      } else if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A' || e.key === 'q' || e.key === 'Q') {
+        e.preventDefault();
+        turnLeft(25);
+      } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        turnRight(25);
+      } else if (e.key === 'r' || e.key === 'R') {
         resetToSpawn();
       } else if (e.key === 'n' || e.key === 'N') {
         resetToNorth();
@@ -392,10 +513,14 @@ export function StreetViewExplorer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [resetToSpawn, resetToNorth, handleTeleportClick]);
+  }, [moveForward, moveBackward, turnLeft, turnRight, resetToSpawn, resetToNorth, handleTeleportClick]);
 
   return (
-    <div className="relative w-full h-full overflow-hidden select-none bg-slate-950">
+    <div
+      className={`relative w-full h-full overflow-hidden select-none bg-slate-950 transition-transform duration-200 ${
+        isStepping ? 'scale-[1.012]' : 'scale-100'
+      }`}
+    >
       {/* 1. Official Google Maps Street View Panorama Container (Always active, no re-mount flickers) */}
       <div
         ref={containerRef}
@@ -469,8 +594,22 @@ export function StreetViewExplorer({
         )}
       </div>
 
-      {/* Zoom buttons in top-right */}
+      {/* Zoom and ambience buttons in top-right */}
       <div className="absolute top-4 right-4 z-20 flex items-center gap-2 pointer-events-auto">
+        {/* Ambient Wind Audio Synthesizer */}
+        <button
+          onClick={handleToggleAmbience}
+          title={isAmbienceOn ? "Désactiver le vent d'ambiance" : "Activer le vent sonore d'ambiance"}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold shadow-lg backdrop-blur-md transition-all cursor-pointer ${
+            isAmbienceOn
+              ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300'
+              : 'bg-slate-900/85 border-slate-700/60 text-slate-300 hover:bg-slate-800'
+          }`}
+        >
+          <Wind className={`w-4 h-4 ${isAmbienceOn ? 'animate-pulse text-cyan-300' : ''}`} />
+          <span className="hidden sm:inline">Ambiance</span>
+        </button>
+
         <button
           onClick={() => handleZoom(-1)}
           title="Zoom avant"
@@ -529,10 +668,63 @@ export function StreetViewExplorer({
         </div>
       )}
 
-      {/* Street View Status Pill */}
-      <div className="absolute bottom-4 left-4 z-20 bg-slate-900/85 border border-slate-700/50 px-3 py-1.5 rounded-full text-[11px] text-slate-300 font-medium flex items-center gap-2 backdrop-blur-md shadow-md pointer-events-none">
-        <span className={`w-2 h-2 rounded-full ${isUsingGooglePano ? 'bg-emerald-400 animate-pulse' : 'bg-cyan-400'}`} />
-        <span>{isUsingGooglePano ? 'Google Street View 360° Actif' : 'Street View 360°'}</span>
+      {/* 5. On-Screen Navigation Arrows Pad (Flèches pour avancer dans le monde) */}
+      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-1.5 pointer-events-auto select-none">
+        {/* Forward Arrow (Avancer sur la route) */}
+        <button
+          onClick={moveForward}
+          title="Avancer dans le monde [Flèche Haut / Z / W]"
+          className="group flex flex-col items-center justify-center px-4 py-2 rounded-2xl bg-slate-900/90 hover:bg-cyan-600 active:scale-95 text-white border-2 border-cyan-400/60 shadow-2xl backdrop-blur-md transition-all cursor-pointer"
+        >
+          <ChevronUp className="w-6 h-6 text-cyan-300 group-hover:text-white group-hover:-translate-y-0.5 transition-transform" />
+          <span className="text-[10px] font-black tracking-wider text-cyan-200 group-hover:text-white -mt-0.5">
+            AVANCER [▲]
+          </span>
+        </button>
+
+        {/* Turn Left, Backward, Turn Right Row */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => turnLeft(25)}
+            title="Pivoter à gauche [Flèche Gauche / Q / A]"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-900/85 hover:bg-slate-800 active:scale-95 text-slate-300 hover:text-white border border-slate-700/60 shadow-lg backdrop-blur-md transition-all cursor-pointer"
+          >
+            <ChevronLeft className="w-4 h-4 text-cyan-400" />
+            <span className="text-[10px] font-semibold">[◄]</span>
+          </button>
+
+          <button
+            onClick={moveBackward}
+            title="Reculer sur la route [Flèche Bas / S]"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-900/85 hover:bg-slate-800 active:scale-95 text-slate-300 hover:text-white border border-slate-700/60 shadow-lg backdrop-blur-md transition-all cursor-pointer"
+          >
+            <ChevronDown className="w-4 h-4 text-cyan-400" />
+            <span className="text-[10px] font-semibold">RECULER [▼]</span>
+          </button>
+
+          <button
+            onClick={() => turnRight(25)}
+            title="Pivoter à droite [Flèche Droite / D]"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-900/85 hover:bg-slate-800 active:scale-95 text-slate-300 hover:text-white border border-slate-700/60 shadow-lg backdrop-blur-md transition-all cursor-pointer"
+          >
+            <span className="text-[10px] font-semibold">[►]</span>
+            <ChevronRight className="w-4 h-4 text-cyan-400" />
+          </button>
+        </div>
+      </div>
+
+      {/* Street View Status Pill & Stepping Odometer */}
+      <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2 pointer-events-none">
+        <div className="bg-slate-900/85 border border-slate-700/50 px-3 py-1.5 rounded-full text-[11px] text-slate-300 font-medium flex items-center gap-2 backdrop-blur-md shadow-md">
+          <span className={`w-2 h-2 rounded-full ${isUsingGooglePano ? 'bg-emerald-400 animate-pulse' : 'bg-cyan-400'}`} />
+          <span>{isUsingGooglePano ? 'Google Street View 360° Actif' : 'Street View 360°'}</span>
+        </div>
+        {Math.abs(stepOffset) > 0 && (
+          <div className="bg-cyan-950/85 border border-cyan-500/40 text-cyan-300 px-3 py-1.5 rounded-full text-[11px] font-mono font-bold tracking-wider backdrop-blur-md shadow-md flex items-center gap-1.5 animate-in fade-in duration-200">
+            <Move className="w-3.5 h-3.5 text-cyan-400" />
+            <span>{Math.abs(stepOffset) * 25} m parcourus</span>
+          </div>
+        )}
       </div>
     </div>
   );

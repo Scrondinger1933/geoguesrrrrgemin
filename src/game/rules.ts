@@ -34,6 +34,27 @@ export function calculateScore(distanceKm: number): number {
   return Math.max(0, Math.min(5000, score));
 }
 
+/**
+ * Calculates extra speed bonus points for fast intuition.
+ */
+export function calculateSpeedBonus(secondsElapsed: number): number {
+  if (secondsElapsed <= 10) return 500;
+  if (secondsElapsed <= 20) return 300;
+  if (secondsElapsed <= 35) return 150;
+  return 0;
+}
+
+/**
+ * Computes accuracy combo multiplier for consecutive accurate guesses.
+ */
+export function calculateComboMultiplier(comboStreak: number): number {
+  if (comboStreak >= 4) return 2.0;
+  if (comboStreak === 3) return 1.75;
+  if (comboStreak === 2) return 1.5;
+  if (comboStreak === 1) return 1.25;
+  return 1.0;
+}
+
 export interface DuelDamageResult {
   loser: 'player' | 'opponent' | 'tie';
   damage: number;

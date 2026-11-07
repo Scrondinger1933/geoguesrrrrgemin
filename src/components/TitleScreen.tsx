@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Swords, Compass, Flame, Trophy, Volume2, VolumeX, Play, Users, Globe2 } from 'lucide-react';
 import { GameMode, BOT_OPPONENTS, OpponentProfile } from '../game/multiplayer';
 import { EarthGlobe } from './EarthGlobe';
+import { AuthAndCloudModal } from './AuthAndCloudModal';
 import { sound } from '../utils/audio';
 
 interface TitleScreenProps {
@@ -15,6 +16,7 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
   const [selectedBot, setSelectedBot] = useState<OpponentProfile>(BOT_OPPONENTS[0]);
   const [customRoom, setCustomRoom] = useState<string>('');
   const [showMultiplayerTab, setShowMultiplayerTab] = useState(false);
+  const [modalTab, setModalTab] = useState<'auth' | 'leaderboard' | 'github' | null>(null);
 
   const handleStart = () => {
     sound.playClick();
@@ -31,7 +33,7 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
       {/* Atmospheric Vignette & Top Light */}
       <div className="absolute inset-0 z-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent pointer-events-none" />
 
-      {/* Top Bar: Title & Sound Toggle */}
+      {/* Top Bar: Title, Cloud SQL, GitHub & Sound Toggle */}
       <header className="relative z-10 flex items-center justify-between px-6 py-5 max-w-7xl mx-auto w-full">
         {/* Title Lockup */}
         <div className="flex items-center gap-3">
@@ -52,14 +54,51 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
           </div>
         </div>
 
-        {/* Audio Mute toggle button */}
-        <button
-          onClick={onToggleMute}
-          title={isMuted ? 'Activer le son' : 'Couper le son'}
-          className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-700/60 text-slate-300 hover:text-cyan-400 hover:bg-slate-800 transition-all backdrop-blur-md active:scale-95 cursor-pointer"
-        >
-          {isMuted ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5 text-cyan-400" />}
-        </button>
+        {/* Right Action Buttons */}
+        <div className="flex items-center gap-2.5">
+          {/* Cloud SQL Leaderboard Button */}
+          <button
+            onClick={() => {
+              sound.playClick();
+              setModalTab('leaderboard');
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-xs font-bold text-amber-300 border border-slate-700/60 shadow-md backdrop-blur-md transition-all active:scale-95 cursor-pointer"
+          >
+            <Trophy className="w-4 h-4 text-amber-400" />
+            <span className="hidden sm:inline">Classement Cloud SQL</span>
+          </button>
+
+          {/* Account & Firebase Auth Button */}
+          <button
+            onClick={() => {
+              sound.playClick();
+              setModalTab('auth');
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-xs font-bold text-cyan-300 border border-slate-700/60 shadow-md backdrop-blur-md transition-all active:scale-95 cursor-pointer"
+          >
+            <span>Compte & Base</span>
+          </button>
+
+          {/* GitHub Button */}
+          <button
+            onClick={() => {
+              sound.playClick();
+              setModalTab('github');
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-purple-900/40 hover:bg-purple-900/60 text-xs font-bold text-purple-200 border border-purple-500/40 shadow-md backdrop-blur-md transition-all active:scale-95 cursor-pointer"
+          >
+            <span>GitHub</span>
+          </button>
+
+          {/* Audio Mute toggle button */}
+          <button
+            onClick={onToggleMute}
+            title={isMuted ? 'Activer le son' : 'Couper le son'}
+            className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-700/60 text-slate-300 hover:text-cyan-400 hover:bg-slate-800 transition-all backdrop-blur-md active:scale-95 cursor-pointer"
+          >
+            {isMuted ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5 text-cyan-400" />}
+          </button>
+        </div>
       </header>
 
       {/* Central Content Area: Mode Cards & Start CTA */}
@@ -247,6 +286,13 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
           <span>T : Spot Aléatoire</span>
         </div>
       </footer>
+
+      {/* Cloud SQL, Firebase Auth & GitHub Modal */}
+      <AuthAndCloudModal
+        isOpen={modalTab !== null}
+        defaultTab={modalTab || 'leaderboard'}
+        onClose={() => setModalTab(null)}
+      />
     </div>
   );
 }

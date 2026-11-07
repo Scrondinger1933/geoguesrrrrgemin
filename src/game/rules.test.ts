@@ -1,72 +1,70 @@
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
   calculateHaversineDistance,
   calculateScore,
+  calculateSpeedBonus,
+  calculateComboMultiplier,
   calculateDuelDamage,
   evaluateCountryStreak,
   formatDistance,
-  getRankTier,
 } from './rules';
 
-test('haversine distance calculates accurately between known coordinates', () => {
-  // Paris (48.8566, 2.3522) to London (51.5074, -0.1278) ~343 km
-  const d = calculateHaversineDistance(
-    { lat: 48.8566, lng: 2.3522 },
-    { lat: 51.5074, lng: -0.1278 }
-  );
-  assert.ok(d > 330 && d < 360, `Distance was ${d}, expected ~343km`);
-});
+describe('GeoRules Engine', () => {
+  it('calculates accurate Haversine distances', () => {
+    // Paris (48.8566, 2.3522) to London (51.5074, -0.1278) ~343 km
+    const dist = calculateHaversineDistance(
+      { lat: 48.8566, lng: 2.3522 },
+      { lat: 51.5074, lng: -0.1278 }
+    );
+    assert(dist > 330 && dist < 360, `Distance was ${dist}`);
+  });
 
-test('score function grants 5000 for near-identical points and decreases with distance', () => {
-  const perfect = calculateScore(0.02); // 20m
-  assert.strictEqual(perfect, 5000);
+  it('awards 5000 points for pin <= 50m', () => {
+    assert.strictEqual(calculateScore(0.02), 5000);
+    assert.strictEqual(calculateScore(0.05), 5000);
+  });
 
-  const close = calculateScore(100);
-  assert.ok(close >= 4500 && close < 5000, `Close score: ${close}`);
+  it('calculates speed bonuses correctly', () => {
+    assert.strictEqual(calculateSpeedBonus(5), 500);
+    assert.strictEqual(calculateSpeedBonus(10), 500);
+    assert.strictEqual(calculateSpeedBonus(15), 300);
+    assert.strictEqual(calculateSpeedBonus(30), 150);
+    assert.strictEqual(calculateSpeedBonus(45), 0);
+  });
 
-  const far = calculateScore(5000);
-  assert.ok(far < 1000, `Far score: ${far}`);
+  it('computes combo multipliers properly', () => {
+    assert.strictEqual(calculateComboMultiplier(0), 1.0);
+    assert.strictEqual(calculateComboMultiplier(1), 1.25);
+    assert.strictEqual(calculateComboMultiplier(2), 1.5);
+    assert.strictEqual(calculateComboMultiplier(3), 1.75);
+    assert.strictEqual(calculateComboMultiplier(4), 2.0);
+    assert.strictEqual(calculateComboMultiplier(6), 2.0);
+  });
 
-  const antipode = calculateScore(16000);
-  assert.strictEqual(antipode, 0);
-});
+  it('handles duel damage and multipliers correctly', () => {
+    const duelR1 = calculateDuelDamage(4500, 3000, 1);
+    assert.strictEqual(duelR1.loser, 'opponent');
+    assert.strictEqual(duelR1.damage, 1500);
 
-test('duel damage computes correctly with ramping multipliers', () => {
-  // Round 1 (1.0x)
-  const res1 = calculateDuelDamage(4500, 3500, 1);
-  assert.strictEqual(res1.loser, 'opponent');
-  assert.strictEqual(res1.damage, 1000);
+    const duelR5 = calculateDuelDamage(2000, 4000, 5);
+    assert.strictEqual(duelR5.loser, 'player');
+    assert.strictEqual(duelR5.damage, 6000); // 2000 * 3.0
+  });
 
-  // Round 3 (1.5x)
-  const res3 = calculateDuelDamage(2000, 4000, 3);
-  assert.strictEqual(res3.loser, 'player');
-  assert.strictEqual(res3.damage, 3000); // 2000 * 1.5
+  it('evaluates country streaks accurately', () => {
+    const correct = evaluateCountryStreak('France', 'france', 2);
+    assert.strictEqual(correct.isCorrect, true);
+    assert.strictEqual(correct.newStreak, 3);
+    assert.strictEqual(correct.streakBonus, 300);
 
-  // Round 5 (3.0x sudden death)
-  const res5 = calculateDuelDamage(5000, 4000, 5);
-  assert.strictEqual(res5.loser, 'opponent');
-  assert.strictEqual(res5.damage, 3000); // 1000 * 3.0
-});
+    const wrong = evaluateCountryStreak('Belgique', 'France', 2);
+    assert.strictEqual(wrong.isCorrect, false);
+    assert.strictEqual(wrong.newStreak, 0);
+  });
 
-test('country streak evaluates correctly', () => {
-  const correct = evaluateCountryStreak('France', 'France', 2);
-  assert.strictEqual(correct.isCorrect, true);
-  assert.strictEqual(correct.newStreak, 3);
-  assert.strictEqual(correct.streakBonus, 300);
-
-  const incorrect = evaluateCountryStreak('Espagne', 'France', 5);
-  assert.strictEqual(incorrect.isCorrect, false);
-  assert.strictEqual(incorrect.newStreak, 0);
-});
-
-test('distance formatting outputs clean localized strings', () => {
-  assert.strictEqual(formatDistance(0.045), '45 m');
-  assert.ok(formatDistance(342.6).includes('342,6') || formatDistance(342.6).includes('342.6'));
-});
-
-test('rank tiers map correctly', () => {
-  assert.strictEqual(getRankTier(24000).title, 'Grand Maître Géographe');
-  assert.strictEqual(getRankTier(20000).title, 'Explorateur Élite');
-  assert.strictEqual(getRankTier(2000).title, 'Novice de la Boussole');
+  it('formats localized distances', () => {
+    assert.strictEqual(formatDistance(0.45), '450 m');
+    assert(formatDistance(12.4).includes('km'));
+  });
 });

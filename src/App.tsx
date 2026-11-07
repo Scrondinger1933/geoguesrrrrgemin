@@ -30,10 +30,13 @@ import {
   LatLng,
   calculateHaversineDistance,
   calculateScore,
+  calculateSpeedBonus,
+  calculateComboMultiplier,
   calculateDuelDamage,
   evaluateCountryStreak,
 } from './game/rules';
 import { sound } from './utils/audio';
+import { auth } from './lib/firebase';
 
 type AppState = 'title' | 'playing' | 'round_result' | 'game_over';
 
@@ -55,6 +58,8 @@ export default function App() {
   const [playerHp, setPlayerHp] = useState(6000);
   const [opponentHp, setOpponentHp] = useState(6000);
   const [streakCount, setStreakCount] = useState(0);
+  const [comboStreak, setComboStreak] = useState(0);
+  const roundStartTimeRef = useRef<number>(Date.now());
 
   // Round Active Data
   const [currentLocation, setCurrentLocation] = useState<GeoLocation>(WORLD_LOCATIONS[0]);
@@ -91,7 +96,9 @@ export default function App() {
     setPlayerHp(6000);
     setOpponentHp(6000);
     setStreakCount(0);
+    setComboStreak(0);
     setUsedLocationIds([]);
+    roundStartTimeRef.current = Date.now();
 
     const firstLoc = getRandomLocation([]);
     setCurrentLocation(firstLoc);
@@ -179,7 +186,17 @@ export default function App() {
 
     const actual = { lat: currentLocation.lat, lng: currentLocation.lng };
     const playerDistance = calculateHaversineDistance(actual, guess);
-    const roundScore = calculateScore(playerDistance);
+    const secondsElapsed = Math.max(1, Math.round((Date.now() - roundStartTimeRef.current) / 1000));
+    const speedBonus = calculateSpeedBonus(secondsElapsed);
+
+    // Combo streak logic: under 350 km qualifies as close
+    const isAccurate = playerDistance <= 350;
+    const nextCombo = isAccurate ? comboStreak + 1 : 0;
+    setComboStreak(nextCombo);
+    const comboMultiplier = calculateComboMultiplier(nextCombo);
+
+    const baseScore = calculateScore(playerDistance);
+    const roundScore = Math.min(5000, Math.round((baseScore + speedBonus) * comboMultiplier));
     const updatedTotalScore = totalScore + roundScore;
     setTotalScore(updatedTotalScore);
 
@@ -221,6 +238,10 @@ export default function App() {
       damagedTarget,
       damageMultiplier:
         currentRound >= 5 ? 3.0 : currentRound === 4 ? 2.0 : currentRound === 3 ? 1.5 : currentRound === 2 ? 1.2 : 1.0,
+      speedBonus,
+      comboMultiplier,
+      comboStreak: nextCombo,
+      timeSeconds: secondsElapsed,
     };
 
     setLastRoundResult(roundData);
@@ -246,6 +267,7 @@ export default function App() {
       setCurrentLocation(nextLoc);
       setUsedLocationIds((prev) => [...prev, nextLoc.id]);
       setCurrentRound((prev) => prev + 1);
+      roundStartTimeRef.current = Date.now();
     } else {
       sound.playDamage();
       setAppState('game_over');
@@ -265,9 +287,34 @@ export default function App() {
       const nextLoc = getRandomLocation(usedLocationIds);
       setCurrentLocation(nextLoc);
       setUsedLocationIds((prev) => [...prev, nextLoc.id]);
+      roundStartTimeRef.current = Date.now();
       setAppState('playing');
     }
   };
+
+  // Record score to Cloud SQL when user finishes game
+  useEffect(() => {
+    if (appState === 'game_over') {
+      const user = auth.currentUser;
+      if (user) {
+        user.getIdToken().then((token) => {
+          fetch('/api/scores', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              mode: gameMode,
+              score: totalScore,
+              roundsCompleted: currentRound,
+              isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
+            }),
+          }).catch((err) => console.error('Failed to post score to Cloud SQL:', err));
+        });
+      }
+    }
+  }, [appState, gameMode, totalScore, currentRound, opponentHp]);
 
   // Toggle Mute
   const handleToggleMute = () => {

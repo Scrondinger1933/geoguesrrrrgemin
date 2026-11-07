@@ -79,6 +79,10 @@ export interface RoundResultData {
   damageDealt?: number;
   damagedTarget?: 'player' | 'opponent' | 'tie';
   damageMultiplier?: number;
+  speedBonus?: number;
+  comboMultiplier?: number;
+  comboStreak?: number;
+  timeSeconds?: number;
 }
 
 /**
