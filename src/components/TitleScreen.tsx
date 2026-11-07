@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { Swords, Compass, Flame, Trophy, Volume2, VolumeX, Play, Users, Globe2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Swords, Compass, Flame, Trophy, Volume2, VolumeX, Play, Users, Globe2, Radio, Sparkles } from 'lucide-react';
 import { GameMode, BOT_OPPONENTS, OpponentProfile } from '../game/multiplayer';
 import { EarthGlobe } from './EarthGlobe';
 import { AuthAndCloudModal } from './AuthAndCloudModal';
+import { MultiplayerLobbyModal } from './MultiplayerLobbyModal';
 import { sound } from '../utils/audio';
 
 interface TitleScreenProps {
@@ -16,7 +17,19 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
   const [selectedBot, setSelectedBot] = useState<OpponentProfile>(BOT_OPPONENTS[0]);
   const [customRoom, setCustomRoom] = useState<string>('');
   const [showMultiplayerTab, setShowMultiplayerTab] = useState(false);
+  const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
+  const [urlRoomCode, setUrlRoomCode] = useState('');
   const [modalTab, setModalTab] = useState<'auth' | 'leaderboard' | 'github' | null>(null);
+
+  // Check URL params for ?room=
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room');
+    if (room) {
+      setUrlRoomCode(room.toUpperCase());
+      setShowMultiplayerModal(true);
+    }
+  }, []);
 
   const handleStart = () => {
     sound.playClick();
@@ -56,6 +69,18 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
 
         {/* Right Action Buttons */}
         <div className="flex items-center gap-2.5">
+          {/* Real-time Server Multiplayer Button */}
+          <button
+            onClick={() => {
+              sound.playClick();
+              setShowMultiplayerModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-xs font-bold text-white border border-cyan-400/50 shadow-md shadow-cyan-500/20 backdrop-blur-md transition-all active:scale-95 cursor-pointer"
+          >
+            <Radio className="w-3.5 h-3.5 text-emerald-300 animate-pulse" />
+            <span>Multijoueur En Ligne</span>
+          </button>
+
           {/* Cloud SQL Leaderboard Button */}
           <button
             onClick={() => {
@@ -76,7 +101,8 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
             }}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-xs font-bold text-cyan-300 border border-slate-700/60 shadow-md backdrop-blur-md transition-all active:scale-95 cursor-pointer"
           >
-            <span>Compte & Base</span>
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Compte & Inscription</span>
           </button>
 
           {/* GitHub Button */}
@@ -245,17 +271,26 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
                 ))}
               </div>
             ) : (
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="Code de salon (ex: AMIS-2026)"
-                  value={customRoom}
-                  onChange={(e) => setCustomRoom(e.target.value)}
-                  className="flex-1 bg-slate-800/90 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
-                />
-                <span className="text-[11px] text-slate-400">
-                  Ouvrez un 2ème onglet avec le même code pour jouer en direct !
-                </span>
+              <div className="p-3.5 bg-gradient-to-r from-cyan-950/60 via-blue-950/50 to-slate-900 border border-cyan-500/40 rounded-xl flex items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    <span className="text-xs font-bold text-white">Serveur WebSocket Temps Réel</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Matchmaking direct 1v1 ou salon privé avec même spot Street View et dégâts partagés !
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    sound.playClick();
+                    setShowMultiplayerModal(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white text-xs font-bold shadow-lg shadow-cyan-500/20 active:scale-95 transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5"
+                >
+                  <Swords className="w-3.5 h-3.5" />
+                  <span>Ouvrir le Salon</span>
+                </button>
               </div>
             )}
           </div>
@@ -292,6 +327,17 @@ export function TitleScreen({ onStartGame, isMuted, onToggleMute }: TitleScreenP
         isOpen={modalTab !== null}
         defaultTab={modalTab || 'leaderboard'}
         onClose={() => setModalTab(null)}
+      />
+
+      {/* Real-time Multiplayer Server Lobby Modal */}
+      <MultiplayerLobbyModal
+        isOpen={showMultiplayerModal}
+        onClose={() => setShowMultiplayerModal(false)}
+        defaultRoomCode={urlRoomCode}
+        onStartGame={(roomId) => {
+          setShowMultiplayerModal(false);
+          onStartGame('duel', BOT_OPPONENTS[0], roomId);
+        }}
       />
     </div>
   );

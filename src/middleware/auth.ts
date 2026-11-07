@@ -17,6 +17,27 @@ export const requireAuth = async (
   }
 
   const token = authHeader.split('Bearer ')[1];
+
+  // 1. Support Cloud SQL verified email accounts
+  if (token.startsWith('email_')) {
+    try {
+      const { getUserByUid } = await import('../db/users.ts');
+      const user = await getUserByUid(token);
+      if (user) {
+        req.user = {
+          uid: user.uid,
+          email: user.email,
+          name: user.displayName || '',
+          picture: user.avatarUrl || '',
+        } as any;
+        return next();
+      }
+    } catch (e) {
+      console.error('Failed to verify email account token:', e);
+    }
+  }
+
+  // 2. Support Firebase Auth ID tokens
   try {
     const decodedToken = await adminAuth.verifyIdToken(token);
     req.user = decodedToken;

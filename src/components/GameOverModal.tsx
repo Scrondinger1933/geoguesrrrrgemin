@@ -10,6 +10,8 @@ interface GameOverModalProps {
   playerHp: number;
   opponentHp: number;
   botOpponent?: OpponentProfile;
+  opponentName?: string;
+  opponentAvatar?: string;
   roundsCount: number;
   streakCount: number;
   onRestart: () => void;
@@ -22,6 +24,8 @@ export function GameOverModal({
   playerHp,
   opponentHp,
   botOpponent,
+  opponentName,
+  opponentAvatar,
   roundsCount,
   streakCount,
   onRestart,
@@ -62,8 +66,8 @@ export function GameOverModal({
         <p className="text-sm text-slate-400 mb-6">
           {mode === 'duel'
             ? isDuelVictory
-              ? `Vous avez terrassé ${botOpponent?.name || 'votre adversaire'} !`
-              : `${botOpponent?.name || 'Votre adversaire'} a été plus rapide et précis.`
+              ? `Vous avez terrassé ${opponentName || botOpponent?.name || 'votre adversaire'} !`
+              : `${opponentName || botOpponent?.name || 'Votre adversaire'} a été plus rapide et précis.`
             : mode === 'streak'
             ? `Vous avez identifié ${streakCount} pays consécutifs sans faute !`
             : `Tour de ${roundsCount} manches accompli.`}

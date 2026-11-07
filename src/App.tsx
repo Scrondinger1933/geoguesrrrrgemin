@@ -17,9 +17,15 @@ import {
   OpponentProfile,
   BOT_OPPONENTS,
   RoundResultData,
-  MultiplayerRoom,
   generateBotGuess,
 } from './game/multiplayer';
+import {
+  multiplayerClient,
+  MultiplayerRoundStart,
+  MultiplayerRoundResolved,
+  MultiplayerMatchOver,
+} from './game/multiplayerClient';
+import { MultiplayerEmotesDock } from './components/MultiplayerEmotesDock';
 import {
   WORLD_LOCATIONS,
   getRandomLocation,
@@ -75,8 +81,10 @@ export default function App() {
   } | null>(null);
   const [blitzTimeLeft, setBlitzTimeLeft] = useState<number>(30);
 
-  // Multiplayer room reference
-  const roomRef = useRef<MultiplayerRoom | null>(null);
+  // Multiplayer state
+  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+  const [onlineOpponent, setOnlineOpponent] = useState<{ name: string; avatar: string } | null>(null);
+  const [isWaitingServerResult, setIsWaitingServerResult] = useState(false);
   const botTimerRef = useRef<number | null>(null);
   const blitzIntervalRef = useRef<number | null>(null);
 
@@ -86,6 +94,75 @@ export default function App() {
     window.addEventListener('gmp-quota-exceeded', handleQuota);
     return () => window.removeEventListener('gmp-quota-exceeded', handleQuota);
   }, []);
+
+  // Listen to WebSocket events when in online multiplayer
+  useEffect(() => {
+    if (!activeRoomId) return;
+
+    const unbindRoundStart = multiplayerClient.on('ROUND_START', (data: MultiplayerRoundStart) => {
+      setCurrentLocation(data.location);
+      setCurrentRound(data.roundNumber);
+      setIsWaitingServerResult(false);
+      setOpponentHasGuessed(false);
+      roundStartTimeRef.current = Date.now();
+      setAppState('playing');
+    });
+
+    const unbindOpponentGuess = multiplayerClient.on('OPPONENT_GUESSED', () => {
+      setOpponentHasGuessed(true);
+      sound.playTick();
+    });
+
+    const unbindResolved = multiplayerClient.on('ROUND_RESOLVED', (data: MultiplayerRoundResolved) => {
+      setIsWaitingServerResult(false);
+      setPlayerHp(data.playerResult.hp);
+      setOpponentHp(data.opponentResult.hp);
+      setTotalScore((prev) => prev + data.playerResult.score);
+
+      const roundData: RoundResultData = {
+        roundNumber: data.roundNumber,
+        location: data.actualLocation,
+        playerGuess: data.playerResult.guess,
+        playerDistanceKm: data.playerResult.distanceKm,
+        playerScore: data.playerResult.score,
+        opponentGuess: data.opponentResult.guess,
+        opponentDistanceKm: data.opponentResult.distanceKm,
+        opponentScore: data.opponentResult.score,
+        damageDealt: data.damageDealt,
+        damagedTarget:
+          data.damagedPlayerId === multiplayerClient.state?.playerId
+            ? 'player'
+            : data.damagedPlayerId === 'tie'
+            ? 'tie'
+            : 'opponent',
+        damageMultiplier: data.damageMultiplier,
+        speedBonus: data.playerResult.speedBonus,
+      };
+
+      setLastRoundResult(roundData);
+      setAppState('round_result');
+    });
+
+    const unbindMatchOver = multiplayerClient.on('MATCH_OVER', () => {
+      setIsWaitingServerResult(false);
+      setAppState('game_over');
+    });
+
+    const unbindRoomState = multiplayerClient.on('ROOM_STATE', (state) => {
+      const op = state.players.find((p: any) => p.id !== state.playerId);
+      if (op) {
+        setOnlineOpponent({ name: op.name, avatar: op.avatar });
+      }
+    });
+
+    return () => {
+      unbindRoundStart();
+      unbindOpponentGuess();
+      unbindResolved();
+      unbindMatchOver();
+      unbindRoomState();
+    };
+  }, [activeRoomId]);
 
   // Start Game handler
   const startGame = useCallback((mode: GameMode, bot: OpponentProfile, roomId?: string) => {
@@ -98,21 +175,20 @@ export default function App() {
     setStreakCount(0);
     setComboStreak(0);
     setUsedLocationIds([]);
+    setIsWaitingServerResult(false);
     roundStartTimeRef.current = Date.now();
 
-    const firstLoc = getRandomLocation([]);
-    setCurrentLocation(firstLoc);
-    setUsedLocationIds([firstLoc.id]);
-
-    // Setup room if custom room provided
+    setActiveRoomId(roomId || null);
     if (roomId) {
-      if (roomRef.current) roomRef.current.close();
-      roomRef.current = new MultiplayerRoom(roomId, (e) => {
-        if (e.data?.type === 'opponent_guess') {
-          setOpponentHasGuessed(true);
-          setOpponentSimulatedGuess(e.data.payload);
-        }
-      });
+      const op = multiplayerClient.state?.players.find((p) => p.id !== multiplayerClient.state?.playerId);
+      if (op) {
+        setOnlineOpponent({ name: op.name, avatar: op.avatar });
+      }
+    } else {
+      setOnlineOpponent(null);
+      const firstLoc = getRandomLocation([]);
+      setCurrentLocation(firstLoc);
+      setUsedLocationIds([firstLoc.id]);
     }
 
     setAppState('playing');
@@ -126,9 +202,9 @@ export default function App() {
     }
   }, [startGame]);
 
-  // Trigger Opponent AI Bot behavior when entering a new playing round
+  // Trigger Opponent AI Bot behavior when entering a new playing round (solo only)
   useEffect(() => {
-    if (appState !== 'playing') {
+    if (appState !== 'playing' || activeRoomId) {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
       if (blitzIntervalRef.current) clearInterval(blitzIntervalRef.current);
       return;
@@ -137,7 +213,7 @@ export default function App() {
     setOpponentHasGuessed(false);
     setOpponentSimulatedGuess(null);
 
-    // Duel mode bot timer
+    // Duel mode bot timer (only for bot games)
     if (gameMode === 'duel') {
       const reactionTimeMs =
         (Math.floor(
@@ -177,12 +253,20 @@ export default function App() {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
       if (blitzIntervalRef.current) clearInterval(blitzIntervalRef.current);
     };
-  }, [appState, currentRound, currentLocation, gameMode, botOpponent]);
+  }, [appState, currentRound, currentLocation, gameMode, botOpponent, activeRoomId]);
 
   // Handle Player Guess submission
   const handlePlayerGuess = (guess: LatLng) => {
     if (botTimerRef.current) clearTimeout(botTimerRef.current);
     if (blitzIntervalRef.current) clearInterval(blitzIntervalRef.current);
+
+    if (activeRoomId) {
+      setIsWaitingServerResult(true);
+      const secondsElapsed = Math.max(1, Math.round((Date.now() - roundStartTimeRef.current) / 1000));
+      multiplayerClient.submitGuess(guess, secondsElapsed);
+      sound.playClick();
+      return;
+    }
 
     const actual = { lat: currentLocation.lat, lng: currentLocation.lng };
     const playerDistance = calculateHaversineDistance(actual, guess);
@@ -276,6 +360,12 @@ export default function App() {
 
   // Move to next round or finish game
   const handleNextRound = () => {
+    if (activeRoomId) {
+      setIsWaitingServerResult(true);
+      multiplayerClient.readyForNextRound();
+      return;
+    }
+
     const isDuelEnded = gameMode === 'duel' && (playerHp <= 0 || opponentHp <= 0);
     const isTourEnded = currentRound >= maxRounds;
 
@@ -292,26 +382,54 @@ export default function App() {
     }
   };
 
+  const handleExitToTitle = () => {
+    sound.playClick();
+    if (activeRoomId) {
+      multiplayerClient.leaveRoom();
+      setActiveRoomId(null);
+      setOnlineOpponent(null);
+      setIsWaitingServerResult(false);
+    }
+    setAppState('title');
+  };
+
   // Record score to Cloud SQL when user finishes game
   useEffect(() => {
     if (appState === 'game_over') {
-      const user = auth.currentUser;
-      if (user) {
-        user.getIdToken().then((token) => {
-          fetch('/api/scores', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-              mode: gameMode,
-              score: totalScore,
-              roundsCompleted: currentRound,
-              isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
-            }),
-          }).catch((err) => console.error('Failed to post score to Cloud SQL:', err));
-        });
+      const emailToken = localStorage.getItem('geoapex_auth_token');
+      if (emailToken) {
+        fetch('/api/scores', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${emailToken}`,
+          },
+          body: JSON.stringify({
+            mode: gameMode,
+            score: totalScore,
+            roundsCompleted: currentRound,
+            isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
+          }),
+        }).catch((err) => console.error('Failed to post score to Cloud SQL:', err));
+      } else {
+        const user = auth.currentUser;
+        if (user) {
+          user.getIdToken().then((token) => {
+            fetch('/api/scores', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                mode: gameMode,
+                score: totalScore,
+                roundsCompleted: currentRound,
+                isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
+              }),
+            }).catch((err) => console.error('Failed to post score to Cloud SQL:', err));
+          });
+        }
       }
     }
   }, [appState, gameMode, totalScore, currentRound, opponentHp]);
@@ -456,13 +574,28 @@ export default function App() {
               playerHp={playerHp}
               opponentHp={opponentHp}
               botOpponent={botOpponent}
+              opponentName={onlineOpponent?.name}
+              opponentAvatar={onlineOpponent?.avatar}
               opponentHasGuessed={opponentHasGuessed}
               timeLeft={gameMode === 'blitz' ? blitzTimeLeft : undefined}
               streakCount={streakCount}
               isMuted={isMuted}
               onToggleMute={handleToggleMute}
-              onExit={() => setAppState('title')}
+              onExit={handleExitToTitle}
             />
+
+            {/* Waiting for Server / Opponent Banner */}
+            {isWaitingServerResult && (
+              <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-cyan-400/60 px-5 py-2.5 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-2.5 animate-in fade-in slide-in-from-top-3 duration-200 pointer-events-none">
+                <div className="w-4 h-4 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
+                <span className="text-xs font-bold text-white">
+                  Coordonnées envoyées au serveur ! En attente de l'adversaire...
+                </span>
+              </div>
+            )}
+
+            {/* Live Multiplayer Tactical Emotes Dock */}
+            {activeRoomId && <MultiplayerEmotesDock />}
 
             {/* 360° Real Google Street View Explorer with Random Spot Teleport */}
             <StreetViewExplorer
@@ -476,7 +609,7 @@ export default function App() {
               <GuessMap
                 apiKey={apiKey}
                 onGuessSubmit={handlePlayerGuess}
-                disabled={false}
+                disabled={isWaitingServerResult}
                 isQuotaExceeded={isQuotaExceeded}
               />
             ) : (
@@ -511,10 +644,12 @@ export default function App() {
             playerHp={playerHp}
             opponentHp={opponentHp}
             botOpponent={botOpponent}
+            opponentName={onlineOpponent?.name}
+            opponentAvatar={onlineOpponent?.avatar}
             roundsCount={currentRound}
             streakCount={streakCount}
-            onRestart={() => startGame(gameMode, botOpponent)}
-            onHome={() => setAppState('title')}
+            onRestart={() => startGame(gameMode, botOpponent, activeRoomId || undefined)}
+            onHome={handleExitToTitle}
           />
         )}
       </div>

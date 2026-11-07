@@ -10,6 +10,8 @@ interface GameHUDProps {
   playerHp: number;
   opponentHp: number;
   botOpponent?: OpponentProfile;
+  opponentName?: string;
+  opponentAvatar?: string;
   opponentHasGuessed: boolean;
   timeLeft?: number;
   streakCount?: number;
@@ -26,6 +28,8 @@ export function GameHUD({
   playerHp,
   opponentHp,
   botOpponent,
+  opponentName,
+  opponentAvatar,
   opponentHasGuessed,
   timeLeft,
   streakCount = 0,
@@ -89,7 +93,10 @@ export function GameHUD({
           {/* Opponent HP */}
           <div className="flex-1">
             <div className="flex justify-between text-[11px] font-bold mb-1">
-              <span className="text-rose-300 truncate max-w-[90px]">{botOpponent?.name || 'ADVERSAIRE'}</span>
+              <span className="text-rose-300 truncate max-w-[120px] flex items-center gap-1">
+                {opponentAvatar && <span>{opponentAvatar}</span>}
+                <span>{opponentName || botOpponent?.name || 'ADVERSAIRE'}</span>
+              </span>
               <span className="font-mono text-rose-400">{Math.max(0, opponentHp)} PV</span>
             </div>
             <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
