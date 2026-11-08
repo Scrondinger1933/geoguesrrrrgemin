@@ -164,10 +164,13 @@ export default function App() {
     };
   }, [activeRoomId]);
 
+  const [activeMapFilter, setActiveMapFilter] = useState<'world' | 'france' | 'capitals' | 'rural'>('world');
+
   // Start Game handler
-  const startGame = useCallback((mode: GameMode, bot: OpponentProfile, roomId?: string) => {
+  const startGame = useCallback((mode: GameMode, bot: OpponentProfile, roomId?: string, mapFilter: 'world' | 'france' | 'capitals' | 'rural' = 'world') => {
     setGameMode(mode);
     setBotOpponent(bot);
+    setActiveMapFilter(mapFilter);
     setCurrentRound(1);
     setTotalScore(0);
     setPlayerHp(6000);
@@ -186,7 +189,7 @@ export default function App() {
       }
     } else {
       setOnlineOpponent(null);
-      const firstLoc = getRandomLocation([]);
+      const firstLoc = getRandomLocation([], mapFilter);
       setCurrentLocation(firstLoc);
       setUsedLocationIds([firstLoc.id]);
     }
@@ -347,7 +350,7 @@ export default function App() {
       setTotalScore((prev) => prev + 1000 + streakResult.streakBonus);
 
       // Advance to next location
-      const nextLoc = getRandomLocation(usedLocationIds);
+      const nextLoc = getRandomLocation(usedLocationIds, activeMapFilter);
       setCurrentLocation(nextLoc);
       setUsedLocationIds((prev) => [...prev, nextLoc.id]);
       setCurrentRound((prev) => prev + 1);
@@ -374,7 +377,7 @@ export default function App() {
     } else {
       const nextRoundNum = currentRound + 1;
       setCurrentRound(nextRoundNum);
-      const nextLoc = getRandomLocation(usedLocationIds);
+      const nextLoc = getRandomLocation(usedLocationIds, activeMapFilter);
       setCurrentLocation(nextLoc);
       setUsedLocationIds((prev) => [...prev, nextLoc.id]);
       roundStartTimeRef.current = Date.now();

@@ -266,25 +266,61 @@ export function StreetViewExplorer({
     };
   }, []); // Run ONCE on mount to prevent recreation loops!
 
-  // 2. When location.id changes (new round or random teleport), smoothly update position without recreating the DOM!
+  // 2. When location.id changes (new round or random teleport), smoothly snap to nearest verified Google Street View road
   useEffect(() => {
     setHeading(location.heading);
     setPitch(location.pitch);
     setFov(80);
     setStepOffset(0);
 
-    if (googlePanoRef.current && isPanoReady.current) {
+    if (googlePanoRef.current && isPanoReady.current && typeof window !== 'undefined' && window.google?.maps?.StreetViewService) {
       try {
-        googlePanoRef.current.setPosition({ lat: location.lat, lng: location.lng });
-        googlePanoRef.current.setPov({ heading: location.heading, pitch: location.pitch });
-        googlePanoRef.current.setZoom(1);
-        googlePanoRef.current.setVisible(true);
-        setIsUsingGooglePano(true);
+        const svService = new window.google.maps.StreetViewService();
+        svService.getPanorama(
+          {
+            location: { lat: location.lat, lng: location.lng },
+            radius: 50000, // 50km road search radius
+            source: window.google.maps.StreetViewSource.OUTDOOR,
+            preference: window.google.maps.StreetViewPreference.NEAREST,
+          },
+          (data, status) => {
+            if (status === window.google.maps.StreetViewStatus.OK && data && data.location && data.location.latLng) {
+              const actualLat = data.location.latLng.lat();
+              const actualLng = data.location.latLng.lng();
+              if (googlePanoRef.current) {
+                if (data.location.pano) {
+                  googlePanoRef.current.setPano(data.location.pano);
+                } else {
+                  googlePanoRef.current.setPosition({ lat: actualLat, lng: actualLng });
+                }
+                googlePanoRef.current.setPov({ heading: location.heading, pitch: location.pitch });
+                googlePanoRef.current.setZoom(1);
+                googlePanoRef.current.setVisible(true);
+                setIsUsingGooglePano(true);
+              }
+              if (onLocationUpdate) {
+                onLocationUpdate(actualLat, actualLng);
+              }
+            } else {
+              // Direct coordinates fallback
+              if (googlePanoRef.current) {
+                googlePanoRef.current.setPosition({ lat: location.lat, lng: location.lng });
+                googlePanoRef.current.setPov({ heading: location.heading, pitch: location.pitch });
+                googlePanoRef.current.setZoom(1);
+                googlePanoRef.current.setVisible(true);
+                setIsUsingGooglePano(true);
+              }
+            }
+          }
+        );
       } catch {
-        // fallback active
+        if (googlePanoRef.current) {
+          googlePanoRef.current.setPosition({ lat: location.lat, lng: location.lng });
+          googlePanoRef.current.setVisible(true);
+        }
       }
     }
-  }, [location.id]); // ONLY trigger when location ID changes, not on sub-pixel lat/lng ticks!
+  }, [location.id]);
 
   // Fallback 360° Photosphere Canvas Renderer (Active when WebGL hardware is initializing or offline)
   useEffect(() => {

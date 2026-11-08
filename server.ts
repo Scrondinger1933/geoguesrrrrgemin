@@ -17,7 +17,7 @@ import {
   getActiveSmtpConfig,
   saveSmtpConfig,
 } from './src/lib/email.ts';
-import { WORLD_LOCATIONS, GeoLocation } from './src/game/locations.ts';
+import { GeoLocation, generateRandomMatchLocations } from './src/game/locations.ts';
 import {
   LatLng,
   calculateHaversineDistance,
@@ -67,10 +67,9 @@ interface ServerRoom {
 
 const rooms = new Map<string, ServerRoom>();
 
-// Helper: Pick 5 distinct random locations for the match
+// Helper: Pick 5 distinct random worldwide locations for the match
 function pickMatchLocations(): GeoLocation[] {
-  const shuffled = [...WORLD_LOCATIONS].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 5);
+  return generateRandomMatchLocations(5);
 }
 
 // Helper: Broadcast event to all players in a room
