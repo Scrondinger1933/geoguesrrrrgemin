@@ -23,7 +23,6 @@ import {
   multiplayerClient,
   MultiplayerRoundStart,
   MultiplayerRoundResolved,
-  MultiplayerMatchOver,
 } from './game/multiplayerClient';
 import { MultiplayerEmotesDock } from './components/MultiplayerEmotesDock';
 import {
@@ -47,17 +46,17 @@ import { auth } from './lib/firebase';
 type AppState = 'title' | 'playing' | 'round_result' | 'game_over';
 
 export default function App() {
-  // Client-Side Quota Defense & Maps API Key
   const [isQuotaExceeded, setIsQuotaExceeded] = useState(false);
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
-  // App Navigation State
   const [appState, setAppState] = useState<AppState>('title');
   const [gameMode, setGameMode] = useState<GameMode>('duel');
   const [botOpponent, setBotOpponent] = useState<OpponentProfile>(BOT_OPPONENTS[0]);
   const [isMuted, setIsMuted] = useState(false);
+  const [initialEmailSent, setInitialEmailSent] = useState(false);
+  const [initialEmailPreviewUrl, setInitialEmailPreviewUrl] = useState<string | undefined>(undefined);
+  const [activePlayerEmail, setActivePlayerEmail] = useState<string | undefined>(undefined);
 
-  // Gameplay State
   const [currentRound, setCurrentRound] = useState(1);
   const maxRounds = 5;
   const [totalScore, setTotalScore] = useState(0);
@@ -67,12 +66,10 @@ export default function App() {
   const [comboStreak, setComboStreak] = useState(0);
   const roundStartTimeRef = useRef<number>(Date.now());
 
-  // Round Active Data
   const [currentLocation, setCurrentLocation] = useState<GeoLocation>(WORLD_LOCATIONS[0]);
   const [usedLocationIds, setUsedLocationIds] = useState<string[]>([]);
   const [lastRoundResult, setLastRoundResult] = useState<RoundResultData | null>(null);
 
-  // Opponent and Timer state
   const [opponentHasGuessed, setOpponentHasGuessed] = useState(false);
   const [opponentSimulatedGuess, setOpponentSimulatedGuess] = useState<{
     guess: LatLng;
@@ -80,41 +77,61 @@ export default function App() {
     score: number;
   } | null>(null);
   const [blitzTimeLeft, setBlitzTimeLeft] = useState<number>(30);
+  const [onlineRoundEndsAt, setOnlineRoundEndsAt] = useState<number | null>(null);
+  const [onlineTimeLeft, setOnlineTimeLeft] = useState<number | undefined>(undefined);
 
-  // Multiplayer state
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [onlineOpponent, setOnlineOpponent] = useState<{ name: string; avatar: string } | null>(null);
   const [isWaitingServerResult, setIsWaitingServerResult] = useState(false);
   const botTimerRef = useRef<number | null>(null);
   const blitzIntervalRef = useRef<number | null>(null);
 
-  // Quota event listener
+  // Sync document.body.dataset.state for deterministic game state checks
+  useEffect(() => {
+    const bodyState =
+      appState === 'title' ? 'title' : appState === 'game_over' ? 'gameover' : 'playing';
+    document.body.dataset.state = bodyState;
+  }, [appState]);
+
   useEffect(() => {
     const handleQuota = () => setIsQuotaExceeded(true);
     window.addEventListener('gmp-quota-exceeded', handleQuota);
     return () => window.removeEventListener('gmp-quota-exceeded', handleQuota);
   }, []);
 
-  // Listen to WebSocket events when in online multiplayer
+  // Live WebSocket Multiplayer Synchronization
   useEffect(() => {
-    if (!activeRoomId) return;
-
     const unbindRoundStart = multiplayerClient.on('ROUND_START', (data: MultiplayerRoundStart) => {
+      setActiveRoomId(multiplayerClient.state?.roomId || 'LIVE');
+      setGameMode(data.mode || 'duel');
       setCurrentLocation(data.location);
       setCurrentRound(data.roundNumber);
+      setOnlineRoundEndsAt(data.roundEndsAt || Date.now() + (data.roundDurationSeconds || 60) * 1000);
+      setOnlineTimeLeft(data.roundDurationSeconds || 60);
       setIsWaitingServerResult(false);
       setOpponentHasGuessed(false);
       roundStartTimeRef.current = Date.now();
       setAppState('playing');
+      sound.playFanfare();
     });
 
-    const unbindOpponentGuess = multiplayerClient.on('OPPONENT_GUESSED', () => {
-      setOpponentHasGuessed(true);
-      sound.playTick();
-    });
+    const unbindOpponentGuess = multiplayerClient.on(
+      'OPPONENT_GUESSED',
+      (data?: { emergencyEndsAt?: number }) => {
+        setOpponentHasGuessed(true);
+        if (data?.emergencyEndsAt) {
+          setOnlineRoundEndsAt((prev) =>
+            prev ? Math.min(prev, data.emergencyEndsAt!) : data.emergencyEndsAt!
+          );
+        }
+        sound.playTick();
+      }
+    );
 
     const unbindResolved = multiplayerClient.on('ROUND_RESOLVED', (data: MultiplayerRoundResolved) => {
       setIsWaitingServerResult(false);
+      setOnlineRoundEndsAt(null);
+      setOnlineTimeLeft(undefined);
       setPlayerHp(data.playerResult.hp);
       setOpponentHp(data.opponentResult.hp);
       setTotalScore((prev) => prev + data.playerResult.score);
@@ -145,13 +162,35 @@ export default function App() {
 
     const unbindMatchOver = multiplayerClient.on('MATCH_OVER', () => {
       setIsWaitingServerResult(false);
+      setOnlineRoundEndsAt(null);
+      setOnlineTimeLeft(undefined);
       setAppState('game_over');
     });
 
+    const unbindRematch = multiplayerClient.on('REMATCH_RESET', () => {
+      setTotalScore(0);
+      setPlayerHp(6000);
+      setOpponentHp(6000);
+      setCurrentRound(1);
+      setLastRoundResult(null);
+      setIsWaitingServerResult(false);
+      setOpponentHasGuessed(false);
+    });
+
     const unbindRoomState = multiplayerClient.on('ROOM_STATE', (state) => {
-      const op = state.players.find((p: any) => p.id !== state.playerId);
-      if (op) {
-        setOnlineOpponent({ name: op.name, avatar: op.avatar });
+      if (state.roomId) {
+        setActiveRoomId(state.roomId);
+        const op = state.players.find((p: any) => p.id !== state.playerId);
+        if (op) {
+          setOnlineOpponent({ name: op.name, avatar: op.avatar });
+        }
+      }
+      if (state.status === 'playing' && multiplayerClient.lastRoundStart) {
+        setGameMode(multiplayerClient.lastRoundStart.mode || 'duel');
+        setCurrentLocation(multiplayerClient.lastRoundStart.location);
+        setCurrentRound(multiplayerClient.lastRoundStart.roundNumber);
+        setOnlineRoundEndsAt(multiplayerClient.lastRoundStart.roundEndsAt);
+        setAppState('playing');
       }
     });
 
@@ -160,44 +199,81 @@ export default function App() {
       unbindOpponentGuess();
       unbindResolved();
       unbindMatchOver();
+      unbindRematch();
       unbindRoomState();
     };
-  }, [activeRoomId]);
+  }, []);
+
+  // Synchronized live countdown ticker for online multiplayer rounds
+  useEffect(() => {
+    if (appState !== 'playing' || !activeRoomId || !onlineRoundEndsAt) {
+      return;
+    }
+
+    const updateTimer = () => {
+      const remaining = Math.max(0, Math.ceil((onlineRoundEndsAt - Date.now()) / 1000));
+      setOnlineTimeLeft((prev) => (prev === remaining ? prev : remaining));
+    };
+
+    updateTimer();
+    const id = window.setInterval(updateTimer, 500);
+    return () => clearInterval(id);
+  }, [appState, activeRoomId, onlineRoundEndsAt]);
 
   const [activeMapFilter, setActiveMapFilter] = useState<'world' | 'france' | 'capitals' | 'rural'>('world');
 
-  // Start Game handler
-  const startGame = useCallback((mode: GameMode, bot: OpponentProfile, roomId?: string, mapFilter: 'world' | 'france' | 'capitals' | 'rural' = 'world') => {
-    setGameMode(mode);
-    setBotOpponent(bot);
-    setActiveMapFilter(mapFilter);
-    setCurrentRound(1);
-    setTotalScore(0);
-    setPlayerHp(6000);
-    setOpponentHp(6000);
-    setStreakCount(0);
-    setComboStreak(0);
-    setUsedLocationIds([]);
-    setIsWaitingServerResult(false);
-    roundStartTimeRef.current = Date.now();
+  const startGame = useCallback(
+    (
+      mode: GameMode,
+      bot: OpponentProfile,
+      roomId?: string,
+      mapFilter: 'world' | 'france' | 'capitals' | 'rural' = 'world'
+    ) => {
+      setGameMode(mode);
+      setBotOpponent(bot);
+      setActiveMapFilter(mapFilter);
+      setCurrentRound(1);
+      setTotalScore(0);
+      setPlayerHp(6000);
+      setOpponentHp(6000);
+      setStreakCount(0);
+      setComboStreak(0);
+      setUsedLocationIds([]);
+      setIsWaitingServerResult(false);
+      roundStartTimeRef.current = Date.now();
+      setInitialEmailSent(false);
+      setInitialEmailPreviewUrl(undefined);
+      sound.initMusic();
+      sound.playMusic().catch(() => {});
 
-    setActiveRoomId(roomId || null);
-    if (roomId) {
-      const op = multiplayerClient.state?.players.find((p) => p.id !== multiplayerClient.state?.playerId);
-      if (op) {
-        setOnlineOpponent({ name: op.name, avatar: op.avatar });
+      setActiveRoomId(roomId || null);
+      if (roomId) {
+        const op = multiplayerClient.state?.players.find(
+          (p) => p.id !== multiplayerClient.state?.playerId
+        );
+        if (op) {
+          setOnlineOpponent({ name: op.name, avatar: op.avatar });
+        }
+        if (multiplayerClient.lastRoundStart) {
+          setCurrentLocation(multiplayerClient.lastRoundStart.location);
+          setCurrentRound(multiplayerClient.lastRoundStart.roundNumber);
+          setOnlineRoundEndsAt(multiplayerClient.lastRoundStart.roundEndsAt);
+        }
+      } else {
+        setOnlineOpponent(null);
+        setOnlineRoundEndsAt(null);
+        setOnlineTimeLeft(undefined);
+        const firstLoc = getRandomLocation([], mapFilter);
+        setCurrentLocation(firstLoc);
+        setUsedLocationIds([firstLoc.id]);
       }
-    } else {
-      setOnlineOpponent(null);
-      const firstLoc = getRandomLocation([], mapFilter);
-      setCurrentLocation(firstLoc);
-      setUsedLocationIds([firstLoc.id]);
-    }
 
-    setAppState('playing');
-  }, []);
+      setAppState('playing');
+    },
+    []
+  );
 
-  // Check URL params for ?autostart=1
+  // Support ?autostart=1 for deterministic testing
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('autostart') === '1') {
@@ -205,7 +281,101 @@ export default function App() {
     }
   }, [startGame]);
 
-  // Trigger Opponent AI Bot behavior when entering a new playing round (solo only)
+  const handlePlayerGuess = useCallback(
+    (guess: LatLng) => {
+      if (botTimerRef.current) clearTimeout(botTimerRef.current);
+      if (blitzIntervalRef.current) clearInterval(blitzIntervalRef.current);
+
+      if (activeRoomId) {
+        setIsWaitingServerResult(true);
+        const secondsElapsed = Math.max(
+          1,
+          Math.round((Date.now() - roundStartTimeRef.current) / 1000)
+        );
+        multiplayerClient.submitGuess(guess, secondsElapsed);
+        sound.playClick();
+        return;
+      }
+
+      const actual = { lat: currentLocation.lat, lng: currentLocation.lng };
+      const playerDistance = calculateHaversineDistance(actual, guess);
+      const secondsElapsed = Math.max(
+        1,
+        Math.round((Date.now() - roundStartTimeRef.current) / 1000)
+      );
+      const speedBonus = calculateSpeedBonus(secondsElapsed);
+
+      const isAccurate = playerDistance <= 350;
+      const nextCombo = isAccurate ? comboStreak + 1 : 0;
+      setComboStreak(nextCombo);
+      const comboMultiplier = calculateComboMultiplier(nextCombo);
+
+      const baseScore = calculateScore(playerDistance);
+      const roundScore = Math.min(5000, Math.round((baseScore + speedBonus) * comboMultiplier));
+      setTotalScore((prev) => prev + roundScore);
+
+      let botGuess = opponentSimulatedGuess;
+      if (!botGuess && gameMode === 'duel') {
+        botGuess = generateBotGuess(actual, botOpponent);
+      }
+
+      let damage = 0;
+      let damagedTarget: 'player' | 'opponent' | 'tie' = 'tie';
+
+      if (gameMode === 'duel' && botGuess) {
+        const damageRes = calculateDuelDamage(roundScore, botGuess.score, currentRound);
+        damage = damageRes.damage;
+        damagedTarget = damageRes.loser;
+
+        if (damageRes.loser === 'player') {
+          setPlayerHp((hp) => Math.max(0, hp - damage));
+        } else if (damageRes.loser === 'opponent') {
+          setOpponentHp((hp) => Math.max(0, hp - damage));
+        }
+      }
+
+      const roundData: RoundResultData = {
+        roundNumber: currentRound,
+        location: currentLocation,
+        playerGuess: guess,
+        playerDistanceKm: playerDistance,
+        playerScore: roundScore,
+        opponentGuess: botGuess?.guess,
+        opponentDistanceKm: botGuess?.distanceKm,
+        opponentScore: botGuess?.score,
+        damageDealt: damage,
+        damagedTarget,
+        damageMultiplier:
+          currentRound >= 5
+            ? 3.0
+            : currentRound === 4
+            ? 2.0
+            : currentRound === 3
+            ? 1.5
+            : currentRound === 2
+            ? 1.2
+            : 1.0,
+        speedBonus,
+        comboMultiplier,
+        comboStreak: nextCombo,
+        timeSeconds: secondsElapsed,
+      };
+
+      setLastRoundResult(roundData);
+      setAppState('round_result');
+    },
+    [
+      activeRoomId,
+      currentLocation,
+      comboStreak,
+      opponentSimulatedGuess,
+      gameMode,
+      botOpponent,
+      currentRound,
+    ]
+  );
+
+  // Solo Bot & Blitz timer
   useEffect(() => {
     if (appState !== 'playing' || activeRoomId) {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
@@ -216,7 +386,6 @@ export default function App() {
     setOpponentHasGuessed(false);
     setOpponentSimulatedGuess(null);
 
-    // Duel mode bot timer (only for bot games)
     if (gameMode === 'duel') {
       const reactionTimeMs =
         (Math.floor(
@@ -236,7 +405,6 @@ export default function App() {
       }, reactionTimeMs);
     }
 
-    // Blitz mode 30s timer
     if (gameMode === 'blitz') {
       setBlitzTimeLeft(30);
       blitzIntervalRef.current = window.setInterval(() => {
@@ -256,86 +424,8 @@ export default function App() {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
       if (blitzIntervalRef.current) clearInterval(blitzIntervalRef.current);
     };
-  }, [appState, currentRound, currentLocation, gameMode, botOpponent, activeRoomId]);
+  }, [appState, currentRound, currentLocation, gameMode, botOpponent, activeRoomId, handlePlayerGuess]);
 
-  // Handle Player Guess submission
-  const handlePlayerGuess = (guess: LatLng) => {
-    if (botTimerRef.current) clearTimeout(botTimerRef.current);
-    if (blitzIntervalRef.current) clearInterval(blitzIntervalRef.current);
-
-    if (activeRoomId) {
-      setIsWaitingServerResult(true);
-      const secondsElapsed = Math.max(1, Math.round((Date.now() - roundStartTimeRef.current) / 1000));
-      multiplayerClient.submitGuess(guess, secondsElapsed);
-      sound.playClick();
-      return;
-    }
-
-    const actual = { lat: currentLocation.lat, lng: currentLocation.lng };
-    const playerDistance = calculateHaversineDistance(actual, guess);
-    const secondsElapsed = Math.max(1, Math.round((Date.now() - roundStartTimeRef.current) / 1000));
-    const speedBonus = calculateSpeedBonus(secondsElapsed);
-
-    // Combo streak logic: under 350 km qualifies as close
-    const isAccurate = playerDistance <= 350;
-    const nextCombo = isAccurate ? comboStreak + 1 : 0;
-    setComboStreak(nextCombo);
-    const comboMultiplier = calculateComboMultiplier(nextCombo);
-
-    const baseScore = calculateScore(playerDistance);
-    const roundScore = Math.min(5000, Math.round((baseScore + speedBonus) * comboMultiplier));
-    const updatedTotalScore = totalScore + roundScore;
-    setTotalScore(updatedTotalScore);
-
-    // Opponent guess in Duel mode
-    let botGuess = opponentSimulatedGuess;
-    if (!botGuess && gameMode === 'duel') {
-      botGuess = generateBotGuess(actual, botOpponent);
-    }
-
-    let damage = 0;
-    let damagedTarget: 'player' | 'opponent' | 'tie' = 'tie';
-    let nextPlayerHp = playerHp;
-    let nextOpponentHp = opponentHp;
-
-    if (gameMode === 'duel' && botGuess) {
-      const damageRes = calculateDuelDamage(roundScore, botGuess.score, currentRound);
-      damage = damageRes.damage;
-      damagedTarget = damageRes.loser;
-
-      if (damageRes.loser === 'player') {
-        nextPlayerHp = Math.max(0, playerHp - damage);
-        setPlayerHp(nextPlayerHp);
-      } else if (damageRes.loser === 'opponent') {
-        nextOpponentHp = Math.max(0, opponentHp - damage);
-        setOpponentHp(nextOpponentHp);
-      }
-    }
-
-    const roundData: RoundResultData = {
-      roundNumber: currentRound,
-      location: currentLocation,
-      playerGuess: guess,
-      playerDistanceKm: playerDistance,
-      playerScore: roundScore,
-      opponentGuess: botGuess?.guess,
-      opponentDistanceKm: botGuess?.distanceKm,
-      opponentScore: botGuess?.score,
-      damageDealt: damage,
-      damagedTarget,
-      damageMultiplier:
-        currentRound >= 5 ? 3.0 : currentRound === 4 ? 2.0 : currentRound === 3 ? 1.5 : currentRound === 2 ? 1.2 : 1.0,
-      speedBonus,
-      comboMultiplier,
-      comboStreak: nextCombo,
-      timeSeconds: secondsElapsed,
-    };
-
-    setLastRoundResult(roundData);
-    setAppState('round_result');
-  };
-
-  // Handle Country Streak guess submission
   const handleCountryGuess = (guessedCountry: string) => {
     const streakResult = evaluateCountryStreak(
       guessedCountry,
@@ -345,11 +435,9 @@ export default function App() {
 
     if (streakResult.isCorrect) {
       sound.playFanfare();
-      const newStreak = streakResult.newStreak;
-      setStreakCount(newStreak);
+      setStreakCount(streakResult.newStreak);
       setTotalScore((prev) => prev + 1000 + streakResult.streakBonus);
 
-      // Advance to next location
       const nextLoc = getRandomLocation(usedLocationIds, activeMapFilter);
       setCurrentLocation(nextLoc);
       setUsedLocationIds((prev) => [...prev, nextLoc.id]);
@@ -361,7 +449,6 @@ export default function App() {
     }
   };
 
-  // Move to next round or finish game
   const handleNextRound = () => {
     if (activeRoomId) {
       setIsWaitingServerResult(true);
@@ -391,62 +478,69 @@ export default function App() {
       multiplayerClient.leaveRoom();
       setActiveRoomId(null);
       setOnlineOpponent(null);
+      setOnlineRoundEndsAt(null);
+      setOnlineTimeLeft(undefined);
       setIsWaitingServerResult(false);
     }
     setAppState('title');
   };
 
-  // Record score to Cloud SQL when user finishes game
+  // Record score to Cloud SQL when game ends & dispatch summary email if configured
   useEffect(() => {
     if (appState === 'game_over') {
       const emailToken = localStorage.getItem('geoapex_auth_token');
-      if (emailToken) {
-        fetch('/api/scores', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${emailToken}`,
-          },
-          body: JSON.stringify({
-            mode: gameMode,
-            score: totalScore,
-            roundsCompleted: currentRound,
-            isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
-          }),
-        }).catch((err) => console.error('Failed to post score to Cloud SQL:', err));
-      } else {
-        const user = auth.currentUser;
-        if (user) {
-          user.getIdToken().then((token) => {
-            fetch('/api/scores', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`,
-              },
-              body: JSON.stringify({
-                mode: gameMode,
-                score: totalScore,
-                roundsCompleted: currentRound,
-                isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
-              }),
-            }).catch((err) => console.error('Failed to post score to Cloud SQL:', err));
+      let savedEmail: string | undefined;
+      try {
+        const raw = localStorage.getItem('geoapex_auth_user');
+        if (raw) savedEmail = JSON.parse(raw)?.email;
+      } catch {}
+      if (!savedEmail && auth.currentUser?.email) {
+        savedEmail = auth.currentUser.email;
+      }
+      setActivePlayerEmail(savedEmail);
+
+      const payload = {
+        mode: gameMode,
+        score: totalScore,
+        roundsCompleted: currentRound,
+        isVictory: gameMode === 'duel' ? opponentHp <= 0 : totalScore >= 20000,
+        email: savedEmail,
+      };
+
+      const submitScore = async (token: string) => {
+        try {
+          const res = await fetch('/api/scores', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(payload),
           });
-        }
+          const data = await res.json();
+          if (data?.deliveredToRealInbox) {
+            setInitialEmailSent(true);
+          } else if (data?.previewUrl) {
+            setInitialEmailPreviewUrl(data.previewUrl);
+          }
+        } catch {}
+      };
+
+      if (emailToken) {
+        submitScore(emailToken);
+      } else if (auth.currentUser) {
+        auth.currentUser.getIdToken().then(submitScore).catch(() => {});
       }
     }
   }, [appState, gameMode, totalScore, currentRound, opponentHp]);
 
-  // Toggle Mute
   const handleToggleMute = () => {
     const muted = sound.toggleMute();
     setIsMuted(muted);
   };
 
-  // Teleport to a new random location anywhere in the world
   const handleRandomTeleport = useCallback(() => {
     sound.playTeleport();
-    // 50% chance of curated spot, 50% pure unpredictable worldwide coordinates
     if (Math.random() > 0.5) {
       const newLoc = getRandomLocation([currentLocation.id]);
       setCurrentLocation(newLoc);
@@ -468,7 +562,7 @@ export default function App() {
           continent: 'Terre',
           alphabet: 'Indices locaux sur la route',
           landscape: 'Observez la végétation, les poteaux électriques et les marquages routiers.',
-          funFact: 'Vous avez été parachuté dans un lieu aléatoire sur le réseau mondial Google Street View !',
+          funFact: 'Lieu généré aléatoirement sur le réseau mondial Street View.',
         },
         theme: {
           skyTop: '#0369a1',
@@ -482,15 +576,12 @@ export default function App() {
     }
   }, [currentLocation.id]);
 
-  // Update actual snapped coordinates from Google Street View & Reverse Geocode
   const handleLocationUpdate = useCallback((actualLat: number, actualLng: number) => {
     setCurrentLocation((prev) => {
-      // Avoid re-rendering if coordinates are virtually identical
       if (Math.abs(prev.lat - actualLat) < 0.00005 && Math.abs(prev.lng - actualLng) < 0.00005) {
         return prev;
       }
 
-      // If location was a mystery random teleport, reverse geocode to reveal true place
       if (
         prev.id.startsWith('random-') &&
         typeof window !== 'undefined' &&
@@ -536,11 +627,10 @@ export default function App() {
   }, []);
 
   return (
-    <APIProvider apiKey={apiKey}>
-      <div className="relative w-screen h-screen overflow-hidden bg-slate-950 font-sans select-none">
-        {/* Client-Side Demo Key Quota Defense Banner per GMP Skill Section 8 */}
+    <APIProvider apiKey={apiKey} language="fr">
+      <div className="relative w-screen h-screen overflow-hidden bg-[#07090F] font-sans select-none">
         {isQuotaExceeded && (
-          <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm flex items-center justify-center gap-1.5">
+          <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2 text-xs md:text-sm text-center sticky top-0 z-50 flex items-center justify-center gap-1.5">
             <span>
               Google Maps Platform quota reached. If you are the app owner, visit{' '}
               <a
@@ -556,7 +646,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Screen 1: Title Screen */}
         {appState === 'title' && (
           <TitleScreen
             onStartGame={startGame}
@@ -565,10 +654,8 @@ export default function App() {
           />
         )}
 
-        {/* Screen 2: Playing State */}
         {appState === 'playing' && (
           <div className="relative w-full h-full">
-            {/* Top Low-Occlusion HUD Bar */}
             <GameHUD
               mode={gameMode}
               roundNumber={currentRound}
@@ -580,34 +667,30 @@ export default function App() {
               opponentName={onlineOpponent?.name}
               opponentAvatar={onlineOpponent?.avatar}
               opponentHasGuessed={opponentHasGuessed}
-              timeLeft={gameMode === 'blitz' ? blitzTimeLeft : undefined}
+              timeLeft={activeRoomId ? onlineTimeLeft : gameMode === 'blitz' ? blitzTimeLeft : undefined}
               streakCount={streakCount}
               isMuted={isMuted}
               onToggleMute={handleToggleMute}
               onExit={handleExitToTitle}
             />
 
-            {/* Waiting for Server / Opponent Banner */}
             {isWaitingServerResult && (
-              <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 border border-cyan-400/60 px-5 py-2.5 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-2.5 animate-in fade-in slide-in-from-top-3 duration-200 pointer-events-none">
+              <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-[#0E131D] border border-cyan-400/50 px-5 py-2.5 rounded-xl shadow-2xl flex items-center gap-2.5 pointer-events-none">
                 <div className="w-4 h-4 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
                 <span className="text-xs font-bold text-white">
-                  Coordonnées envoyées au serveur ! En attente de l'adversaire...
+                  Repère enregistré — En attente de l’adversaire...
                 </span>
               </div>
             )}
 
-            {/* Live Multiplayer Tactical Emotes Dock */}
             {activeRoomId && <MultiplayerEmotesDock />}
 
-            {/* 360° Real Google Street View Explorer with Random Spot Teleport */}
             <StreetViewExplorer
               location={currentLocation}
               onRandomTeleport={handleRandomTeleport}
               onLocationUpdate={handleLocationUpdate}
             />
 
-            {/* Bottom Right Guess Map Widget */}
             {gameMode !== 'streak' ? (
               <GuessMap
                 apiKey={apiKey}
@@ -616,15 +699,11 @@ export default function App() {
                 isQuotaExceeded={isQuotaExceeded}
               />
             ) : (
-              <CountryStreakModal
-                onSelectCountry={handleCountryGuess}
-                disabled={false}
-              />
+              <CountryStreakModal onSelectCountry={handleCountryGuess} disabled={false} />
             )}
           </div>
         )}
 
-        {/* Screen 3: Round Result Modal */}
         {appState === 'round_result' && lastRoundResult && (
           <RoundResult
             data={lastRoundResult}
@@ -632,6 +711,7 @@ export default function App() {
             playerHp={playerHp}
             opponentHp={opponentHp}
             onNextRound={handleNextRound}
+            isWaitingOpponent={isWaitingServerResult}
             isGameOver={
               (gameMode === 'duel' && (playerHp <= 0 || opponentHp <= 0)) ||
               (gameMode !== 'streak' && currentRound >= maxRounds)
@@ -639,7 +719,6 @@ export default function App() {
           />
         )}
 
-        {/* Screen 4: Game Over / Victory Modal */}
         {appState === 'game_over' && (
           <GameOverModal
             mode={gameMode}
@@ -651,7 +730,12 @@ export default function App() {
             opponentAvatar={onlineOpponent?.avatar}
             roundsCount={currentRound}
             streakCount={streakCount}
-            onRestart={() => startGame(gameMode, botOpponent, activeRoomId || undefined)}
+            playerEmail={activePlayerEmail}
+            initialEmailSent={initialEmailSent}
+            initialEmailPreviewUrl={initialEmailPreviewUrl}
+            isOnlineMultiplayer={Boolean(activeRoomId)}
+            onRematch={activeRoomId ? () => multiplayerClient.requestRematch() : undefined}
+            onRestart={() => startGame(gameMode, botOpponent, activeRoomId || undefined, activeMapFilter)}
             onHome={handleExitToTitle}
           />
         )}

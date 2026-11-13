@@ -1,6 +1,6 @@
 /**
- * Procedural Web Audio API sound synthesizer for GeoApex.
- * 100% zero external audio files, works offline, no 404 risk.
+ * Procedural Web Audio API sound synthesizer and soundtrack manager for GeoApex.
+ * Features official game music "Across the Meridian" and tactical SFX.
  */
 
 class SoundEngine {
@@ -8,6 +8,39 @@ class SoundEngine {
   public isMuted: boolean = false;
   private ambientSource: AudioBufferSourceNode | null = null;
   public isAmbientActive: boolean = false;
+
+  // Background Music: Across the Meridian
+  private bgMusic: HTMLAudioElement | null = null;
+  public isMusicPlaying: boolean = false;
+  public musicVolume: number = 0.35;
+  public readonly trackTitle: string = 'Across the Meridian';
+  public readonly trackUrl: string = '/assets/aistudio/Across_the_Meridian_35bcbe0a.mp3';
+  private musicListeners: Set<(isPlaying: boolean) => void> = new Set();
+  private userInteractionBound: boolean = false;
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      this.bindUserInteraction();
+    }
+  }
+
+  private bindUserInteraction() {
+    if (this.userInteractionBound || typeof window === 'undefined') return;
+    this.userInteractionBound = true;
+
+    const handleFirstTouch = () => {
+      this.initCtx();
+      // Start music on first touch if not muted
+      if (!this.isMuted && !this.isMusicPlaying) {
+        this.playMusic().catch(() => {});
+      }
+      window.removeEventListener('pointerdown', handleFirstTouch);
+      window.removeEventListener('keydown', handleFirstTouch);
+    };
+
+    window.addEventListener('pointerdown', handleFirstTouch, { once: true });
+    window.addEventListener('keydown', handleFirstTouch, { once: true });
+  }
 
   private initCtx() {
     if (!this.ctx && typeof window !== 'undefined') {
@@ -23,10 +56,103 @@ class SoundEngine {
     }
   }
 
+  public initMusic(): HTMLAudioElement | null {
+    if (typeof window === 'undefined') return null;
+    if (!this.bgMusic) {
+      try {
+        const audio = new Audio(this.trackUrl);
+        audio.loop = true;
+        audio.volume = this.isMuted ? 0 : this.musicVolume;
+        audio.preload = 'auto';
+
+        audio.addEventListener('play', () => {
+          this.isMusicPlaying = true;
+          this.notifyMusicListeners();
+        });
+
+        audio.addEventListener('pause', () => {
+          this.isMusicPlaying = false;
+          this.notifyMusicListeners();
+        });
+
+        audio.addEventListener('ended', () => {
+          this.isMusicPlaying = false;
+          this.notifyMusicListeners();
+        });
+
+        this.bgMusic = audio;
+      } catch (e) {
+        console.log('[AUDIO] Could not initialize music:', e);
+      }
+    }
+    return this.bgMusic;
+  }
+
+  public async playMusic(): Promise<boolean> {
+    if (this.isMuted) return false;
+    const audio = this.initMusic();
+    if (!audio) return false;
+
+    try {
+      audio.volume = this.musicVolume;
+      await audio.play();
+      this.isMusicPlaying = true;
+      this.notifyMusicListeners();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public pauseMusic() {
+    if (this.bgMusic) {
+      this.bgMusic.pause();
+      this.isMusicPlaying = false;
+      this.notifyMusicListeners();
+    }
+  }
+
+  public toggleMusic(): boolean {
+    if (this.isMusicPlaying) {
+      this.pauseMusic();
+      return false;
+    } else {
+      this.playMusic();
+      return true;
+    }
+  }
+
+  public setMusicVolume(vol: number) {
+    this.musicVolume = Math.max(0, Math.min(1, vol));
+    if (this.bgMusic && !this.isMuted) {
+      this.bgMusic.volume = this.musicVolume;
+    }
+  }
+
+  public subscribeMusic(listener: (isPlaying: boolean) => void): () => void {
+    this.musicListeners.add(listener);
+    listener(this.isMusicPlaying);
+    return () => {
+      this.musicListeners.delete(listener);
+    };
+  }
+
+  private notifyMusicListeners() {
+    this.musicListeners.forEach((fn) => fn(this.isMusicPlaying));
+  }
+
   public toggleMute(): boolean {
     this.isMuted = !this.isMuted;
-    if (this.isMuted && this.isAmbientActive) {
-      this.stopAmbience();
+    if (this.isMuted) {
+      if (this.isAmbientActive) this.stopAmbience();
+      if (this.bgMusic) this.bgMusic.volume = 0;
+    } else {
+      if (this.bgMusic) {
+        this.bgMusic.volume = this.musicVolume;
+        if (!this.bgMusic.paused) {
+          this.bgMusic.play().catch(() => {});
+        }
+      }
     }
     return this.isMuted;
   }

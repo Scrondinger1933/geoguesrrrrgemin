@@ -1,8 +1,9 @@
 import { db } from './index.ts';
 import { users, gameScores, verificationCodes } from './schema.ts';
 import { eq, desc, and, gte } from 'drizzle-orm';
+import crypto from 'crypto';
 
-// Upsert user upon login
+// Upsert user upon Firebase login
 export async function getOrCreateUser(
   uid: string,
   email: string,
@@ -14,14 +15,16 @@ export async function getOrCreateUser(
       .insert(users)
       .values({
         uid,
-        email,
+        email: email.trim().toLowerCase(),
         displayName: displayName || email.split('@')[0],
         avatarUrl: avatarUrl || '',
+        emailVerified: 1,
       })
       .onConflictDoUpdate({
         target: users.uid,
         set: {
-          email,
+          email: email.trim().toLowerCase(),
+          updatedAt: new Date(),
           ...(displayName ? { displayName } : {}),
           ...(avatarUrl ? { avatarUrl } : {}),
         },
@@ -35,6 +38,75 @@ export async function getOrCreateUser(
   }
 }
 
+export async function getUserByEmail(email: string) {
+  const normalized = email.trim().toLowerCase();
+  const res = await db.select().from(users).where(eq(users.email, normalized)).limit(1);
+  return res[0] || null;
+}
+
+export async function getUserByUid(uid: string) {
+  const res = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
+  return res[0] || null;
+}
+
+export async function createOrActivateEmailUser(params: {
+  email: string;
+  passwordHash: string;
+  displayName?: string;
+  avatarUrl?: string;
+}) {
+  const normalizedEmail = params.email.trim().toLowerCase();
+  const existing = await getUserByEmail(normalizedEmail);
+
+  if (existing) {
+    const updated = await db
+      .update(users)
+      .set({
+        passwordHash: params.passwordHash,
+        emailVerified: 1,
+        updatedAt: new Date(),
+        ...(params.displayName ? { displayName: params.displayName } : {}),
+        ...(params.avatarUrl ? { avatarUrl: params.avatarUrl } : {}),
+      })
+      .where(eq(users.id, existing.id))
+      .returning();
+    return updated[0];
+  }
+
+  const customUid = `email_${crypto.randomBytes(10).toString('hex')}`;
+  const inserted = await db
+    .insert(users)
+    .values({
+      uid: customUid,
+      email: normalizedEmail,
+      displayName: params.displayName || normalizedEmail.split('@')[0],
+      avatarUrl: params.avatarUrl || '👑',
+      passwordHash: params.passwordHash,
+      emailVerified: 1,
+    })
+    .returning();
+
+  return inserted[0];
+}
+
+export async function updateUserPasswordByEmail(email: string, passwordHash: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await getUserByEmail(normalizedEmail);
+  if (!existing) return null;
+
+  const updated = await db
+    .update(users)
+    .set({
+      passwordHash,
+      emailVerified: 1,
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, existing.id))
+    .returning();
+
+  return updated[0] || null;
+}
+
 // Record completed game score
 export async function recordGameScore(
   uid: string,
@@ -44,7 +116,6 @@ export async function recordGameScore(
   isVictory: boolean = false
 ) {
   try {
-    // 1. Find user by Firebase UID
     const existingUser = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
     if (!existingUser || existingUser.length === 0) {
       throw new Error(`User with uid ${uid} not found`);
@@ -52,7 +123,6 @@ export async function recordGameScore(
 
     const userRecord = existingUser[0];
 
-    // 2. Insert game score
     await db.insert(gameScores).values({
       userId: userRecord.id,
       mode,
@@ -60,7 +130,6 @@ export async function recordGameScore(
       roundsCompleted,
     });
 
-    // 3. Update user statistics
     const newHighest = Math.max(userRecord.highestScore, score);
     const newGamesPlayed = userRecord.gamesPlayed + 1;
     const newDuelsWon = isVictory ? userRecord.duelsWon + 1 : userRecord.duelsWon;
@@ -71,6 +140,7 @@ export async function recordGameScore(
         highestScore: newHighest,
         gamesPlayed: newGamesPlayed,
         duelsWon: newDuelsWon,
+        updatedAt: new Date(),
       })
       .where(eq(users.id, userRecord.id));
 
@@ -101,16 +171,17 @@ export async function getTopLeaderboard(limit = 10) {
   }
 }
 
-// 4. Generate & Save a 6-digit verification code in Cloud SQL (valid 15 mins)
+// Compatibility helpers
 export async function createVerificationCode(email: string): Promise<string> {
   const normalizedEmail = email.trim().toLowerCase();
-  // 6-digit code e.g. 749215
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  const code = crypto.randomInt(100000, 1000000).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   await db.insert(verificationCodes).values({
     email: normalizedEmail,
-    code,
+    purpose: 'general',
+    code: 'HASHED',
+    codeHash: code,
     expiresAt,
     used: 0,
   });
@@ -118,7 +189,6 @@ export async function createVerificationCode(email: string): Promise<string> {
   return code;
 }
 
-// 5. Verify the code and activate/create the account in Cloud SQL
 export async function verifyCodeAndCreateAccount(
   email: string,
   code: string,
@@ -128,14 +198,13 @@ export async function verifyCodeAndCreateAccount(
   const normalizedEmail = email.trim().toLowerCase();
   const trimmedCode = code.trim();
 
-  // Find valid, unexpired, unused code
   const records = await db
     .select()
     .from(verificationCodes)
     .where(
       and(
         eq(verificationCodes.email, normalizedEmail),
-        eq(verificationCodes.code, trimmedCode),
+        eq(verificationCodes.codeHash, trimmedCode),
         eq(verificationCodes.used, 0),
         gte(verificationCodes.expiresAt, new Date())
       )
@@ -147,54 +216,39 @@ export async function verifyCodeAndCreateAccount(
     throw new Error('Code de vérification invalide ou expiré.');
   }
 
-  // Mark code as used
   await db
     .update(verificationCodes)
-    .set({ used: 1 })
+    .set({ used: 1, usedAt: new Date() })
     .where(eq(verificationCodes.id, records[0].id));
 
-  // Find or create user
-  const existing = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, normalizedEmail))
-    .limit(1);
-
-  let userRecord;
-  if (existing.length > 0) {
-    // Update existing user to verified
-    const updated = await db
-      .update(users)
-      .set({
-        emailVerified: 1,
-        ...(displayName ? { displayName } : {}),
-        ...(avatarUrl ? { avatarUrl } : {}),
-      })
-      .where(eq(users.id, existing[0].id))
-      .returning();
-    userRecord = updated[0];
-  } else {
-    // Create new email account
-    const customUid = `email_${Math.random().toString(36).substring(2, 12)}_${Date.now()}`;
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid: customUid,
-        email: normalizedEmail,
-        displayName: displayName || normalizedEmail.split('@')[0],
-        avatarUrl: avatarUrl || '👑',
-        emailVerified: 1,
-      })
-      .returning();
-    userRecord = inserted[0];
-  }
-
-  return userRecord;
+  return createOrActivateEmailUser({
+    email: normalizedEmail,
+    passwordHash: '',
+    displayName,
+    avatarUrl,
+  });
 }
 
-// 6. Get user by UID
-export async function getUserByUid(uid: string) {
-  const res = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
-  return res[0] || null;
-}
+export async function quickCreateAccount(
+  email: string,
+  displayName?: string,
+  avatarUrl?: string
+) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await getUserByEmail(normalizedEmail);
+  if (existing) return existing;
 
+  const customUid = `email_${crypto.randomBytes(10).toString('hex')}`;
+  const inserted = await db
+    .insert(users)
+    .values({
+      uid: customUid,
+      email: normalizedEmail,
+      displayName: displayName || normalizedEmail.split('@')[0],
+      avatarUrl: avatarUrl || '👑',
+      emailVerified: 1,
+    })
+    .returning();
+
+  return inserted[0];
+}

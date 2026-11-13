@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { maskEmail, formatSmtpError } from '../lib/email.ts';
 
 // Test verification code generation specifications
 test('Verification code format and validation', () => {
@@ -20,4 +21,30 @@ test('Verification code format and validation', () => {
   const expiresAt = new Date(now + 15 * 60 * 1000);
   assert.ok(expiresAt.getTime() > now, 'Expiration time must be in future');
   assert.strictEqual(Math.round((expiresAt.getTime() - now) / 60000), 15);
+});
+
+test('Email masking hides sensitive characters in server logs', () => {
+  assert.strictEqual(maskEmail('alexandre.soeirofrance@gmail.com'), 'al***@gmail.com');
+  assert.strictEqual(maskEmail('studiomaldecenasoeiro@gmail.com'), 'st***@gmail.com');
+  assert.strictEqual(maskEmail('contact@example.com'), 'co***@example.com');
+  assert.strictEqual(maskEmail('ab@domain.com'), 'a***@domain.com');
+});
+
+test('SMTP error formatting handles Google STARTTLS response codes cleanly', () => {
+  // 535 Bad Credentials
+  const eauth = formatSmtpError({ code: 'EAUTH', message: '535-5.7.8 Username and Password not accepted' });
+  assert.ok(eauth.includes('535 Bad Credentials'), 'Should explain 535 Bad Credentials');
+  assert.ok(eauth.includes('apppasswords'), 'Should suggest Google App Password');
+
+  // Connection failure
+  const econn = formatSmtpError({ code: 'ECONNECTION', message: 'connect ECONNREFUSED' });
+  assert.ok(econn.includes('serveur SMTP impossible'), 'Should explain server connection error');
+
+  // Timeout failure
+  const etime = formatSmtpError({ code: 'ETIMEDOUT', message: 'connection timed out' });
+  assert.ok(etime.includes('délai d\'attente dépassé'), 'Should explain timeout');
+
+  // Envelope failure
+  const eenv = formatSmtpError({ code: 'EENVELOPE', message: '550 User unknown' });
+  assert.ok(eenv.includes('rejetée'), 'Should explain envelope rejection');
 });

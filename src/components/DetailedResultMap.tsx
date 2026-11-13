@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useMapsLibrary } from '@vis.gl/react-google-maps';
 import L from 'leaflet';
 import { LatLng } from '../game/rules';
 
@@ -9,64 +10,51 @@ interface DetailedResultMapProps {
   className?: string;
 }
 
-// Red pin for player's guess matching OpenGuessr (image_24da0ebb.png)
-const createPlayerPinIcon = () => {
-  return L.divIcon({
-    className: 'player-guess-pin',
-    html: `
-      <div style="position: relative; width: 32px; height: 42px; transform: translate(-50%, -100%);">
-        <svg viewBox="0 0 32 42" width="32" height="42" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5));">
-          <path d="M16 0C7.163 0 0 7.163 0 16c0 11.2 14.5 24.8 15.1 25.4.5.5 1.3.5 1.8 0C17.5 40.8 32 27.2 32 16 32 7.163 24.837 0 16 0z" fill="#ef4444"/>
-          <path d="M16 1.5C8.047 1.5 1.6 7.947 1.6 15.9c0 10.3 13.1 23.1 14.4 24.3.4.4.8.4 1.2 0 1.3-1.2 14.4-14 14.4-24.3 0-7.953-6.447-14.4-14.4-14.4z" stroke="#b91c1c" stroke-width="1.2"/>
-          <circle cx="16" cy="16" r="6" fill="#ffffff" stroke="#991b1b" stroke-width="1.5"/>
+function buildTargetFlagHtml(): string {
+  return `
+    <div style="position: relative; width: 46px; height: 50px;">
+      <div class="geo-flag-ripple" style="position: absolute; left: 23px; top: 47px; width: 18px; height: 18px; border-radius: 9999px; border: 2px solid #10B981; background: rgba(16, 185, 129, 0.28);"></div>
+      <div class="geo-flag-drop" style="position: relative; width: 46px; height: 50px;">
+        <svg viewBox="0 0 46 50" width="46" height="50" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 4px 8px rgba(0,0,0,0.65)); overflow: visible;">
+          <circle cx="23" cy="47" r="3.4" fill="#10B981" stroke="#FFFFFF" stroke-width="1.5"/>
+          <rect x="21.5" y="7" width="3" height="40" rx="1.5" fill="#F8FAFC" stroke="#0F172A" stroke-width="0.9"/>
+          <circle cx="23" cy="6.5" r="2.8" fill="#F59E0B" stroke="#0F172A" stroke-width="0.9"/>
+          <g class="geo-flag-wave" style="transform-origin: 23px 14px;">
+            <path d="M24.5 8.5H45L42 15L45 21.5H24.5V8.5Z" fill="#0F172A" stroke="#10B981" stroke-width="1.6" stroke-linejoin="round"/>
+            <rect x="25" y="9" width="5" height="6" fill="#FFFFFF"/>
+            <rect x="35" y="9" width="5" height="6" fill="#FFFFFF"/>
+            <rect x="30" y="15" width="5" height="6" fill="#FFFFFF"/>
+            <rect x="40" y="15" width="4.5" height="6" fill="#FFFFFF"/>
+          </g>
         </svg>
       </div>
-    `,
-    iconSize: [32, 42],
-    iconAnchor: [16, 42],
-  });
-};
+    </div>
+  `;
+}
 
-// Target flag marker matching OpenGuessr (image_24da0ebb.png)
-const createTargetFlagIcon = () => {
-  return L.divIcon({
-    className: 'target-flag-pin',
-    html: `
-      <div style="position: relative; width: 32px; height: 40px; transform: translate(-20%, -100%);">
-        <svg viewBox="0 0 32 40" width="32" height="40" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.6));">
-          <!-- Flag pole -->
-          <rect x="4" y="2" width="3" height="38" rx="1.5" fill="#1e293b"/>
-          <!-- Flag pennant with checkered pattern -->
-          <path d="M7 4h18l-3 7 3 7H7V4z" fill="#0f172a" stroke="#ffffff" stroke-width="1.5"/>
-          <rect x="10" y="6" width="4" height="4" fill="#ffffff"/>
-          <rect x="16" y="6" width="4" height="4" fill="#ffffff"/>
-          <rect x="7" y="10" width="4" height="4" fill="#ffffff"/>
-          <rect x="13" y="10" width="4" height="4" fill="#ffffff"/>
-          <circle cx="5.5" cy="3" r="2.5" fill="#f59e0b"/>
+function buildGuessFlagHtml(color: string, labelColor: string): string {
+  return `
+    <div style="position: relative; width: 42px; height: 46px;">
+      <div class="geo-flag-drop" style="position: relative; width: 42px; height: 46px;">
+        <svg viewBox="0 0 42 46" width="42" height="46" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 4px 8px rgba(0,0,0,0.65)); overflow: visible;">
+          <circle cx="21" cy="43" r="3" fill="${color}" stroke="#FFFFFF" stroke-width="1.5"/>
+          <rect x="19.6" y="7" width="2.8" height="36" rx="1.4" fill="#F8FAFC" stroke="#0F172A" stroke-width="0.8"/>
+          <circle cx="21" cy="6.5" r="2.5" fill="${labelColor}" stroke="#0F172A" stroke-width="0.8"/>
+          <g class="geo-flag-wave" style="transform-origin: 21px 14px;">
+            <path d="M22.4 8.5C27.5 6.5 32.5 10.5 38.5 8.5L41.5 9L39 14.5L41.5 20C39.2 21 36.8 20.8 34.5 19.8C29.5 17.4 26 21.6 22.4 19.8V8.5Z" fill="${color}" stroke="#FFFFFF" stroke-width="1.4" stroke-linejoin="round"/>
+            <circle cx="30" cy="14.2" r="2.3" fill="#FFFFFF"/>
+          </g>
         </svg>
       </div>
-    `,
-    iconSize: [32, 40],
-    iconAnchor: [5, 40],
-  });
-};
+    </div>
+  `;
+}
 
-// Opponent marker (in duel mode)
-const createOpponentPinIcon = () => {
-  return L.divIcon({
-    className: 'opponent-guess-pin',
-    html: `
-      <div style="position: relative; width: 28px; height: 36px; transform: translate(-50%, -100%);">
-        <svg viewBox="0 0 32 42" width="28" height="36" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5));">
-          <path d="M16 0C7.163 0 0 7.163 0 16c0 11.2 14.5 24.8 15.1 25.4.5.5 1.3.5 1.8 0C17.5 40.8 32 27.2 32 16 32 7.163 24.837 0 16 0z" fill="#a855f7"/>
-          <circle cx="16" cy="16" r="6" fill="#ffffff" stroke="#6b21a8" stroke-width="1.5"/>
-        </svg>
-      </div>
-    `,
-    iconSize: [28, 36],
-    iconAnchor: [14, 36],
-  });
-};
+function createHtmlElement(html: string): HTMLDivElement {
+  const container = document.createElement('div');
+  container.innerHTML = html.trim();
+  return (container.firstElementChild as HTMLDivElement) || container;
+}
 
 export function DetailedResultMap({
   actual,
@@ -74,14 +62,148 @@ export function DetailedResultMap({
   opponentGuess,
   className = '',
 }: DetailedResultMapProps) {
+  const mapsLib = useMapsLibrary('maps');
+  const markerLib = useMapsLibrary('marker');
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
+  const leafletMapRef = useRef<L.Map | null>(null);
+  const googleActiveRef = useRef(false);
+  const [allowFallback, setAllowFallback] = useState(false);
 
   useEffect(() => {
-    if (!containerRef.current) return;
-    if (mapRef.current) return;
+    if (mapsLib && markerLib) {
+      setAllowFallback(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setAllowFallback(true), 2400);
+    return () => window.clearTimeout(timer);
+  }, [mapsLib, markerLib]);
 
-    // Create Leaflet Map
+  // 1. Genuine Google Maps JavaScript API with AdvancedMarkerElement Flag Pins
+  useEffect(() => {
+    if (!containerRef.current || !mapsLib || !markerLib) return;
+
+    if (leafletMapRef.current) {
+      leafletMapRef.current.remove();
+      leafletMapRef.current = null;
+      containerRef.current.innerHTML = '';
+    }
+
+    try {
+      const mapOptions: google.maps.MapOptions & {
+        internalUsageAttributionIds?: string[];
+      } = {
+        center: { lat: actual.lat, lng: actual.lng },
+        zoom: 4,
+        mapId: 'DEMO_MAP_ID',
+        mapTypeId: mapsLib.MapTypeId.ROADMAP,
+        zoomControl: true,
+        streetViewControl: false,
+        mapTypeControl: true,
+        fullscreenControl: false,
+        clickableIcons: false,
+        internalUsageAttributionIds: ['gmp_git_agentskills_v1'],
+      };
+
+      const map = new mapsLib.Map(containerRef.current, mapOptions);
+      googleActiveRef.current = true;
+
+      const markers: google.maps.marker.AdvancedMarkerElement[] = [];
+      const polylines: google.maps.Polyline[] = [];
+
+      // Actual target marker (animated checkered victory flag)
+      markers.push(
+        new markerLib.AdvancedMarkerElement({
+          position: { lat: actual.lat, lng: actual.lng },
+          map,
+          title: `Emplacement réel (${actual.lat.toFixed(4)}°, ${actual.lng.toFixed(4)}°)`,
+          content: createHtmlElement(buildTargetFlagHtml()),
+          zIndex: 1000,
+        })
+      );
+
+      // Player guess marker (animated rose flag)
+      markers.push(
+        new markerLib.AdvancedMarkerElement({
+          position: { lat: guess.lat, lng: guess.lng },
+          map,
+          title: `Votre drapeau (${guess.lat.toFixed(4)}°, ${guess.lng.toFixed(4)}°)`,
+          content: createHtmlElement(buildGuessFlagHtml('#F43F5E', '#F59E0B')),
+          zIndex: 900,
+        })
+      );
+
+      // Connecting dashed geodesic line
+      polylines.push(
+        new mapsLib.Polyline({
+          path: [
+            { lat: guess.lat, lng: guess.lng },
+            { lat: actual.lat, lng: actual.lng },
+          ],
+          geodesic: true,
+          strokeColor: '#0F172A',
+          strokeOpacity: 0,
+          icons: [
+            {
+              icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.95, scale: 3 },
+              offset: '0',
+              repeat: '14px',
+            },
+          ],
+          map,
+        })
+      );
+
+      // Opponent marker if duel
+      if (opponentGuess) {
+        markers.push(
+          new markerLib.AdvancedMarkerElement({
+            position: { lat: opponentGuess.lat, lng: opponentGuess.lng },
+            map,
+            title: 'Drapeau Adversaire',
+            content: createHtmlElement(buildGuessFlagHtml('#9333EA', '#22D3EE')),
+            zIndex: 800,
+          })
+        );
+
+        polylines.push(
+          new mapsLib.Polyline({
+            path: [
+              { lat: opponentGuess.lat, lng: opponentGuess.lng },
+              { lat: actual.lat, lng: actual.lng },
+            ],
+            geodesic: true,
+            strokeColor: '#9333EA',
+            strokeOpacity: 0.75,
+            strokeWeight: 2.5,
+            map,
+          })
+        );
+      }
+
+      const bounds = new window.google.maps.LatLngBounds();
+      bounds.extend({ lat: actual.lat, lng: actual.lng });
+      bounds.extend({ lat: guess.lat, lng: guess.lng });
+      if (opponentGuess) bounds.extend({ lat: opponentGuess.lat, lng: opponentGuess.lng });
+      map.fitBounds(bounds, 55);
+
+      return () => {
+        googleActiveRef.current = false;
+        markers.forEach((m) => {
+          m.map = null;
+        });
+        polylines.forEach((p) => p.setMap(null));
+      };
+    } catch {
+      googleActiveRef.current = false;
+      setAllowFallback(true);
+    }
+  }, [actual, guess, opponentGuess, mapsLib, markerLib]);
+
+  // 2. Leaflet Fallback when Google Maps isn't available
+  useEffect(() => {
+    if (!containerRef.current || googleActiveRef.current || !allowFallback) return;
+    if (leafletMapRef.current) return;
+
     const map = L.map(containerRef.current, {
       center: [actual.lat, actual.lng],
       zoom: 4,
@@ -90,107 +212,78 @@ export function DetailedResultMap({
       worldCopyJump: true,
     });
 
-    // OpenStreetMap high-detail tiles (complete map with countries, borders, and cities, no key needed)
-    L.tileLayer(
-      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        subdomains: ['a', 'b', 'c'],
-        maxZoom: 19,
-      }
-    ).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      subdomains: ['a', 'b', 'c'],
+      maxZoom: 19,
+    }).addTo(map);
 
-    // 1. Target Location Flag Marker
-    L.marker([actual.lat, actual.lng], {
-      icon: createTargetFlagIcon(),
-      zIndexOffset: 1000,
-    })
-      .addTo(map)
-      .bindPopup(
-        `<div style="font-size: 11px; font-weight: bold; color: #0f172a;">Point Exact (${actual.lat.toFixed(2)}°, ${actual.lng.toFixed(2)}°)</div>`
-      );
+    const targetIcon = L.divIcon({
+      className: 'custom-result-target-flag',
+      html: buildTargetFlagHtml(),
+      iconSize: [46, 50],
+      iconAnchor: [23, 47],
+    });
 
-    // 2. Player Guess Marker
-    L.marker([guess.lat, guess.lng], {
-      icon: createPlayerPinIcon(),
-      zIndexOffset: 900,
-    })
-      .addTo(map)
-      .bindPopup(
-        `<div style="font-size: 11px; font-weight: bold; color: #ef4444;">Votre Repère</div>`
-      );
+    const playerIcon = L.divIcon({
+      className: 'custom-result-player-flag',
+      html: buildGuessFlagHtml('#F43F5E', '#F59E0B'),
+      iconSize: [42, 46],
+      iconAnchor: [21, 43],
+    });
 
-    // 3. Connecting Polyline between Guess and Actual (Dark dashed line as in image_24da0ebb.png)
-    const polyline = L.polyline(
+    L.marker([actual.lat, actual.lng], { icon: targetIcon, zIndexOffset: 1000 }).addTo(map);
+    L.marker([guess.lat, guess.lng], { icon: playerIcon, zIndexOffset: 900 }).addTo(map);
+
+    if (opponentGuess) {
+      const oppIcon = L.divIcon({
+        className: 'custom-result-opp-flag',
+        html: buildGuessFlagHtml('#9333EA', '#22D3EE'),
+        iconSize: [42, 46],
+        iconAnchor: [21, 43],
+      });
+      L.marker([opponentGuess.lat, opponentGuess.lng], { icon: oppIcon, zIndexOffset: 800 }).addTo(map);
+      L.polyline(
+        [
+          [opponentGuess.lat, opponentGuess.lng],
+          [actual.lat, actual.lng],
+        ],
+        { color: '#9333EA', weight: 2.5, opacity: 0.75 }
+      ).addTo(map);
+    }
+
+    L.polyline(
       [
         [guess.lat, guess.lng],
         [actual.lat, actual.lng],
       ],
       {
-        color: '#0f172a',
+        color: '#0F172A',
         weight: 3.5,
         dashArray: '6, 6',
         opacity: 0.9,
       }
     ).addTo(map);
 
-    // 4. Opponent Marker & line (if duel mode)
-    if (opponentGuess) {
-      L.marker([opponentGuess.lat, opponentGuess.lng], {
-        icon: createOpponentPinIcon(),
-        zIndexOffset: 800,
-      }).addTo(map);
-
-      L.polyline(
-        [
-          [opponentGuess.lat, opponentGuess.lng],
-          [actual.lat, actual.lng],
-        ],
-        {
-          color: '#9333ea',
-          weight: 2.5,
-          dashArray: '4, 6',
-          opacity: 0.7,
-        }
-      ).addTo(map);
-    }
-
-    // Auto-fit bounds with padding so both markers and line are clearly visible
-    const points: [number, number][] = [
+    const bounds = L.latLngBounds([
       [actual.lat, actual.lng],
       [guess.lat, guess.lng],
-    ];
-    if (opponentGuess) {
-      points.push([opponentGuess.lat, opponentGuess.lng]);
-    }
-    const bounds = L.latLngBounds(points);
-    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
-
-    mapRef.current = map;
-
-    // Invalidate size once rendered and on container resize
-    const observer = new ResizeObserver(() => {
-      map.invalidateSize();
-    });
-    if (containerRef.current) {
-      observer.observe(containerRef.current);
-    }
-
-    const timer = setTimeout(() => {
-      map.invalidateSize();
-    }, 100);
+    ]);
+    if (opponentGuess) bounds.extend([opponentGuess.lat, opponentGuess.lng]);
+    map.fitBounds(bounds, { padding: [45, 45] });
+    leafletMapRef.current = map;
 
     return () => {
-      observer.disconnect();
-      clearTimeout(timer);
       map.remove();
-      mapRef.current = null;
+      leafletMapRef.current = null;
     };
-  }, [actual, guess, opponentGuess]);
+  }, [actual, guess, opponentGuess, allowFallback]);
 
   return (
-    <div className={`relative w-full h-full overflow-hidden rounded-2xl ${className}`}>
-      <div ref={containerRef} className="w-full h-full" />
-    </div>
+    <div
+      ref={containerRef}
+      className={`w-full h-full min-h-[300px] rounded-2xl overflow-hidden shadow-inner ${className}`}
+      data-testid="result-map"
+    />
   );
 }

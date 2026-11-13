@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Trophy,
   Github,
@@ -13,14 +13,16 @@ import {
   Mail,
   KeyRound,
   UserCheck,
-  Sparkles,
   ArrowRight,
   RefreshCw,
   AlertCircle,
-  Settings,
   Send,
-  HelpCircle,
+  Trash2,
+  Terminal,
+  Lock,
+  ArrowLeft,
 } from 'lucide-react';
+
 import { auth, googleAuthProvider, signInWithPopup, signOut } from '../lib/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { sound } from '../utils/audio';
@@ -45,87 +47,231 @@ interface CustomAuthUser {
   emailVerified: number;
 }
 
-interface SmtpStatus {
+interface EmailStatus {
   configured: boolean;
+  provider: 'gmail' | 'smtp' | 'brevo' | 'resend' | 'ethereal' | 'local';
   user: string | null;
+  fromEmail: string;
+  fromName: string;
   host: string;
   port: number;
+  hasResendKey: boolean;
+  hasBrevoKey: boolean;
+  hasSmtpPass: boolean;
 }
 
 interface AuthAndCloudModalProps {
   isOpen: boolean;
   onClose: () => void;
-  defaultTab?: 'auth' | 'leaderboard' | 'github';
+  defaultTab?: 'auth' | 'leaderboard' | 'keys' | 'github';
 }
 
-const AVATAR_OPTIONS = ['👑', '⚡', '🎯', '🚀', '🧭', '🦁', '🐯', '🦅', '🐺', '🏆'];
+interface OtpSixBoxInputProps {
+  idPrefix: string;
+  value: string;
+  onChange: (nextCode: string) => void;
+  accent?: 'cyan' | 'amber';
+}
 
-export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' }: AuthAndCloudModalProps) {
-  const [activeTab, setActiveTab] = useState<'auth' | 'leaderboard' | 'github'>(defaultTab);
+function OtpSixBoxInput({ idPrefix, value, onChange, accent = 'cyan' }: OtpSixBoxInputProps) {
+  const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const digits = Array.from({ length: 6 }, (_, i) => value[i] || '');
+
+  const handleDigitChange = (index: number, raw: string) => {
+    const clean = raw.replace(/\D/g, '');
+    if (!clean) {
+      const next = digits.map((d, idx) => (idx === index ? '' : d)).join('');
+      onChange(next);
+      return;
+    }
+
+    if (clean.length > 1) {
+      const pasted = clean.slice(0, 6);
+      onChange(pasted);
+      const focusIdx = Math.min(5, pasted.length - 1);
+      inputRefs.current[focusIdx]?.focus();
+      return;
+    }
+
+    const updated = [...digits];
+    updated[index] = clean;
+    onChange(updated.join(''));
+    if (index < 5) {
+      inputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !digits[index] && index > 0) {
+      const updated = [...digits];
+      updated[index - 1] = '';
+      onChange(updated.join(''));
+      inputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowLeft' && index > 0) {
+      inputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowRight' && index < 5) {
+      inputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    if (text) {
+      e.preventDefault();
+      onChange(text);
+      const focusIdx = Math.min(5, text.length - 1);
+      inputRefs.current[focusIdx]?.focus();
+    }
+  };
+
+  const focusClass =
+    accent === 'amber'
+      ? 'focus:border-amber-400 border-amber-400/35'
+      : 'focus:border-cyan-400 border-cyan-400/35';
+
+  return (
+    <div className="grid grid-cols-6 gap-2 sm:gap-2.5" role="group" aria-label="Code de vérification à 6 chiffres">
+      {digits.map((digit, index) => (
+        <input
+          key={index}
+          id={`${idPrefix}-${index}`}
+          ref={(el) => {
+            inputRefs.current[index] = el;
+          }}
+          type="text"
+          inputMode="numeric"
+          autoComplete={index === 0 ? 'one-time-code' : 'off'}
+          maxLength={6}
+          aria-label={`Chiffre ${index + 1} sur 6`}
+          value={digit}
+          onChange={(e) => handleDigitChange(index, e.target.value)}
+          onKeyDown={(e) => handleKeyDown(index, e)}
+          onPaste={handlePaste}
+          className={`h-12 sm:h-14 rounded-xl bg-[#0E131D] border ${focusClass} text-xl sm:text-2xl font-mono-numbers font-bold text-center text-white focus:outline-none transition-colors`}
+        />
+      ))}
+    </div>
+  );
+}
+
+const AVATAR_OPTIONS = ['👑', '⚡', '🎯', '🚀', '🧭', '🦁'];
+
+export function AuthAndCloudModal({
+  isOpen,
+  onClose,
+  defaultTab = 'leaderboard',
+}: AuthAndCloudModalProps) {
+  const [activeTab, setActiveTab] = useState<'auth' | 'leaderboard' | 'keys' | 'github'>(defaultTab);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [emailUser, setEmailUser] = useState<CustomAuthUser | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  // Email Verification Form State
-  const [authMethod, setAuthMethod] = useState<'email' | 'google'>('email');
-  const [emailStep, setEmailStep] = useState<'enter_email' | 'enter_code'>('enter_email');
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(defaultTab);
+    }
+  }, [isOpen, defaultTab]);
+
+  // Auth form states
+  const [accountMode, setAccountMode] = useState<'register' | 'login' | 'reset'>('register');
+  const [accountPassword, setAccountPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [authMethod, setAuthMethod] = useState<'password' | 'google'>('password');
   const [emailInput, setEmailInput] = useState('');
   const [displayNameInput, setDisplayNameInput] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState('👑');
-  const [codeInput, setCodeInput] = useState('');
+
+  const [regStep, setRegStep] = useState<'form' | 'verify_code'>('form');
+  const [regCodeInput, setRegCodeInput] = useState('');
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  const [resetStep, setResetStep] = useState<'request' | 'verify_and_update'>('request');
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetCode, setResetCode] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [lastDispatchedEmail, setLastDispatchedEmail] = useState<any>(null);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [receivedCodeBanner, setReceivedCodeBanner] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // Real Email Delivery details
-  const [emailDeliveryInfo, setEmailDeliveryInfo] = useState<{
-    isRealSmtp: boolean;
-    previewUrl?: string | null;
-  } | null>(null);
+  // Real Email Provider Wizard state
+  const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
+  const [providerTab, setProviderTab] = useState<'gmail' | 'brevo' | 'resend' | 'smtp'>('gmail');
+  const [cfgEmailUser, setCfgEmailUser] = useState('studiomaldecenasoeiro@gmail.com');
+  const [cfgAppPassword, setCfgAppPassword] = useState('');
+  const [cfgSmtpHost, setCfgSmtpHost] = useState('smtp.gmail.com');
+  const [cfgSmtpPort, setCfgSmtpPort] = useState('587');
+  const [cfgFromEmail, setCfgFromEmail] = useState('studiomaldecenasoeiro@gmail.com');
+  const [cfgFromName, setCfgFromName] = useState('Studio Maldecena Soeiro');
+  const [cfgBrevoKey, setCfgBrevoKey] = useState('');
+  const [cfgResendKey, setCfgResendKey] = useState('');
+  const [smtpTestRecipient, setSmtpTestRecipient] = useState('alexandre.soeirofrance@gmail.com');
+  const [isSavingEmailCfg, setIsSavingEmailCfg] = useState(false);
+  const [isTestingSmtp, setIsTestingSmtp] = useState(false);
+  const [smtpTestResult, setSmtpTestResult] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [showAppPasswordHelp, setShowAppPasswordHelp] = useState(false);
 
-  // SMTP Settings State
-  const [showSmtpConfig, setShowSmtpConfig] = useState(false);
-  const [smtpStatus, setSmtpStatus] = useState<SmtpStatus | null>(null);
-  const [smtpEmailInput, setSmtpEmailInput] = useState('');
-  const [smtpPasswordInput, setSmtpPasswordInput] = useState('');
-  const [smtpSaving, setSmtpSaving] = useState(false);
-  const [smtpFeedback, setSmtpFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  // Developer API keys state
+  const [apiKeys, setApiKeys] = useState<any[]>([]);
+  const [generatedKey, setGeneratedKey] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [isGeneratingKey, setIsGeneratingKey] = useState(false);
 
-  // Check SMTP status from server
-  const fetchSmtpStatus = async () => {
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const id = window.setInterval(() => {
+      setResendCooldown((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [resendCooldown]);
+
+  const notifyAuthUpdated = () => {
+    window.dispatchEvent(new Event('geoapex-auth-updated'));
+  };
+
+  const fetchEmailStatus = async () => {
     try {
-      const res = await fetch('/api/auth/smtp-status');
+      const res = await fetch('/api/auth/email-status');
       if (res.ok) {
         const data = await res.json();
-        setSmtpStatus(data);
+        setEmailStatus(data);
+        if (data.fromEmail) setCfgFromEmail(data.fromEmail);
       }
-    } catch (e) {
-      console.error('Error fetching SMTP status:', e);
-    }
+    } catch {}
+  };
+
+  const fetchApiKeys = async () => {
+    try {
+      const res = await fetch('/api/keys/list');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.keys) setApiKeys(data.keys);
+      }
+    } catch {}
   };
 
   useEffect(() => {
     if (isOpen) {
-      fetchSmtpStatus();
+      fetchEmailStatus();
+      if (activeTab === 'keys') {
+        fetchApiKeys();
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, activeTab]);
 
-  // Load existing session from localStorage (email user)
   useEffect(() => {
     try {
       const stored = localStorage.getItem('geoapex_auth_user');
-      if (stored) {
-        setEmailUser(JSON.parse(stored));
-      }
-    } catch (e) {
-      console.error('Error loading stored user:', e);
-    }
+      if (stored) setEmailUser(JSON.parse(stored));
+    } catch {}
   }, []);
 
-  // Sync Firebase auth state
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
@@ -143,42 +289,42 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
               avatarUrl: user.photoURL,
             }),
           });
-        } catch (e) {
-          console.error('Failed to sync user with Cloud SQL backend', e);
-        }
+        } catch {}
       }
     });
     return () => unsubscribe();
   }, []);
 
-  // Fetch leaderboard when tab is opened
   useEffect(() => {
     if (isOpen && activeTab === 'leaderboard') {
       setIsLoadingLeaderboard(true);
       fetch('/api/leaderboard')
         .then((res) => res.json())
         .then((data) => {
-          if (data.leaderboard) {
-            setLeaderboard(data.leaderboard);
-          }
+          if (data.leaderboard) setLeaderboard(data.leaderboard);
         })
-        .catch((err) => console.error('Error fetching leaderboard:', err))
+        .catch(() => {})
         .finally(() => setIsLoadingLeaderboard(false));
     }
   }, [isOpen, activeTab]);
 
   if (!isOpen) return null;
 
-  // 1. Send verification code with real email sending
-  const handleSendCode = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const dispatchRegistrationCode = async () => {
     setErrorMessage(null);
     setSuccessMessage(null);
-    setEmailDeliveryInfo(null);
 
     const email = emailInput.trim().toLowerCase();
     if (!email || !email.includes('@')) {
-      setErrorMessage('Veuillez entrer une adresse email valide.');
+      setErrorMessage('Veuillez saisir une adresse e-mail valide.');
+      return;
+    }
+    if (!accountPassword || accountPassword.length < 6) {
+      setErrorMessage('Le mot de passe doit comporter au moins 6 caractères.');
+      return;
+    }
+    if (accountPassword !== confirmPassword) {
+      setErrorMessage('Les deux mots de passe ne correspondent pas.');
       return;
     }
 
@@ -186,51 +332,52 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
     sound.playClick();
 
     try {
-      const res = await fetch('/api/auth/send-verification-code', {
+      const res = await fetch('/api/auth/request-register-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email,
+          password: accountPassword,
           displayName: displayNameInput.trim() || undefined,
+          avatarUrl: selectedAvatar,
         }),
       });
+
       const data = await res.json();
-
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Impossible d’envoyer le code');
+        throw new Error(data.error || 'Erreur lors de la demande d’inscription');
       }
 
-      setReceivedCodeBanner(data.verificationCode);
-      setEmailDeliveryInfo({
-        isRealSmtp: !!data.isRealSmtp,
-        previewUrl: data.previewUrl,
-      });
-
-      if (data.isRealSmtp) {
-        setSuccessMessage(`✓ E-mail envoyé avec succès à ${email} ! Vérifiez votre boîte de réception.`);
-      } else {
-        setSuccessMessage(`✓ E-mail officiel GeoApex généré pour ${email} !`);
-      }
-
-      setEmailStep('enter_code');
+      setRegCodeInput('');
+      setLastDispatchedEmail(data.emailDetails || null);
+      setRegStep('verify_code');
+      setResendCooldown(45);
+      setSuccessMessage(
+        data.deliveredToRealInbox
+          ? `Un code à 6 chiffres vient d’être envoyé à ${email}.`
+          : data.message
+      );
     } catch (err: any) {
-      setErrorMessage(err.message || 'Une erreur est survenue lors de l’envoi.');
+      setErrorMessage(err.message || 'Impossible de créer le compte');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // 2. Verify code and create account
-  const handleVerifyCode = async (e: React.FormEvent) => {
+  const handleRequestRegisterCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await dispatchRegistrationCode();
+  };
+
+  const handleConfirmRegisterCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
 
     const email = emailInput.trim().toLowerCase();
-    const code = codeInput.trim();
-
-    if (!code || code.length < 4) {
-      setErrorMessage('Veuillez entrer le code de vérification à 6 chiffres.');
+    const code = regCodeInput.trim();
+    if (!code || code.length < 6) {
+      setErrorMessage('Veuillez saisir les 6 chiffres du code de vérification.');
       return;
     }
 
@@ -238,15 +385,10 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
     sound.playClick();
 
     try {
-      const res = await fetch('/api/auth/verify-and-register', {
+      const res = await fetch('/api/auth/confirm-register-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email,
-          code,
-          displayName: displayNameInput.trim() || email.split('@')[0],
-          avatarUrl: selectedAvatar,
-        }),
+        body: JSON.stringify({ email, code }),
       });
 
       const data = await res.json();
@@ -258,12 +400,12 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
       setEmailUser(data.user);
       localStorage.setItem('geoapex_auth_user', JSON.stringify(data.user));
       localStorage.setItem('geoapex_auth_token', data.token);
-
-      setSuccessMessage('🎉 Compte activé avec succès et enregistré dans Cloud SQL !');
-      setEmailStep('enter_email');
-      setCodeInput('');
-      setReceivedCodeBanner(null);
-      setEmailDeliveryInfo(null);
+      notifyAuthUpdated();
+      setSuccessMessage(`Compte activé ! Bienvenue ${data.user.displayName}.`);
+      setRegStep('form');
+      setAccountPassword('');
+      setConfirmPassword('');
+      setRegCodeInput('');
     } catch (err: any) {
       setErrorMessage(err.message || 'Code invalide ou expiré');
     } finally {
@@ -271,57 +413,271 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
     }
   };
 
-  // 3. Save SMTP Credentials
-  const handleSaveSmtp = async (e: React.FormEvent) => {
+  const handleLoginWithPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSmtpFeedback(null);
-    if (!smtpEmailInput || !smtpPasswordInput) {
-      setSmtpFeedback({ type: 'error', msg: 'Email et mot de passe d’application requis.' });
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const email = emailInput.trim().toLowerCase();
+    if (!email || !accountPassword) {
+      setErrorMessage('Veuillez renseigner votre e-mail et mot de passe.');
       return;
     }
 
-    setSmtpSaving(true);
+    setIsSubmitting(true);
     sound.playClick();
 
     try {
-      const res = await fetch('/api/auth/configure-smtp', {
+      const res = await fetch('/api/auth/login-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user: smtpEmailInput.trim(),
-          pass: smtpPasswordInput.trim(),
-          host: smtpEmailInput.includes('@gmail.com') ? 'smtp.gmail.com' : 'smtp.gmail.com',
-          port: 587,
-          fromName: 'GeoApex 3D Game',
-        }),
+        body: JSON.stringify({ email, password: accountPassword }),
       });
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Erreur lors de la configuration');
+        throw new Error(data.error || 'Identifiants incorrects');
       }
 
-      setSmtpFeedback({ type: 'success', msg: 'Configuration SMTP enregistrée ! Tous les e-mails partent maintenant via votre compte.' });
-      fetchSmtpStatus();
-      setSmtpPasswordInput('');
+      sound.playFanfare();
+      setEmailUser(data.user);
+      localStorage.setItem('geoapex_auth_user', JSON.stringify(data.user));
+      localStorage.setItem('geoapex_auth_token', data.token);
+      notifyAuthUpdated();
+      setSuccessMessage(`Connexion réussie ! Bonjour ${data.user.displayName}.`);
+      setAccountPassword('');
     } catch (err: any) {
-      setSmtpFeedback({ type: 'error', msg: err.message || 'Erreur d’enregistrement' });
+      setErrorMessage(err.message || 'Erreur de connexion');
     } finally {
-      setSmtpSaving(false);
+      setIsSubmitting(false);
     }
   };
 
-  // Google sign in fallback
+  const dispatchResetCode = async () => {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const email = resetEmail.trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      setErrorMessage('Veuillez entrer une adresse e-mail valide.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    sound.playClick();
+
+    try {
+      const res = await fetch('/api/auth/request-reset-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Erreur lors de la demande');
+      }
+
+      setResetCode('');
+      setLastDispatchedEmail(data.emailDetails || null);
+      setResetStep('verify_and_update');
+      setResendCooldown(45);
+      setSuccessMessage(
+        data.deliveredToRealInbox
+          ? `Code de réinitialisation envoyé à ${email}.`
+          : data.message
+      );
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Impossible d’envoyer le code');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRequestResetCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await dispatchResetCode();
+  };
+
+  const handleConfirmResetCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const email = resetEmail.trim().toLowerCase();
+    const code = resetCode.trim();
+    if (!code || code.length < 6) {
+      setErrorMessage('Veuillez saisir les 6 chiffres reçus par e-mail.');
+      return;
+    }
+    if (!resetPassword || resetPassword.length < 6) {
+      setErrorMessage('Le nouveau mot de passe doit comporter au moins 6 caractères.');
+      return;
+    }
+    if (resetPassword !== resetConfirmPassword) {
+      setErrorMessage('Les deux mots de passe ne correspondent pas.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    sound.playClick();
+
+    try {
+      const res = await fetch('/api/auth/confirm-reset-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code, newPassword: resetPassword }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Code de sécurité invalide ou expiré');
+      }
+
+      sound.playFanfare();
+      setEmailUser(data.user);
+      localStorage.setItem('geoapex_auth_user', JSON.stringify(data.user));
+      localStorage.setItem('geoapex_auth_token', data.token);
+      notifyAuthUpdated();
+      setSuccessMessage('Mot de passe mis à jour avec succès. Vous êtes connecté.');
+      setResetStep('request');
+      setResetPassword('');
+      setResetConfirmPassword('');
+      setResetCode('');
+      setAccountMode('login');
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Erreur lors du changement de mot de passe');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSaveEmailConfiguration = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingEmailCfg(true);
+    setSmtpTestResult(null);
+    sound.playClick();
+
+    try {
+      const payload: Record<string, any> = {
+        provider: providerTab,
+        fromEmail: cfgFromEmail.trim(),
+        fromName: cfgFromName.trim() || 'Studio Maldecena Soeiro',
+        testRecipient: smtpTestRecipient.trim() || 'alexandre.soeirofrance@gmail.com',
+      };
+
+      if (providerTab === 'gmail') {
+        payload.user = cfgEmailUser.trim();
+        payload.pass = cfgAppPassword.trim();
+        payload.host = 'smtp.gmail.com';
+        payload.port = 587;
+      } else if (providerTab === 'smtp') {
+        payload.user = cfgEmailUser.trim();
+        payload.pass = cfgAppPassword.trim();
+        payload.host = cfgSmtpHost.trim();
+        payload.port = Number(cfgSmtpPort) || 587;
+      } else if (providerTab === 'brevo') {
+        payload.brevoApiKey = cfgBrevoKey.trim();
+      } else if (providerTab === 'resend') {
+        payload.resendApiKey = cfgResendKey.trim();
+      }
+
+      const res = await fetch('/api/auth/configure-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Échec de validation du fournisseur e-mail.');
+      }
+
+      sound.playFanfare();
+      setSmtpTestResult({ type: 'success', msg: data.message });
+      setCfgAppPassword('');
+      await fetchEmailStatus();
+    } catch (err: any) {
+      setSmtpTestResult({ type: 'error', msg: err.message || 'Erreur de configuration.' });
+    } finally {
+      setIsSavingEmailCfg(false);
+    }
+  };
+
+  const handleTestLiveEmail = async () => {
+    setIsTestingSmtp(true);
+    setSmtpTestResult(null);
+    sound.playClick();
+
+    try {
+      const res = await fetch('/api/auth/test-smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetEmail: smtpTestRecipient.trim() || 'alexandre.soeirofrance@gmail.com',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Aucun relais réel configuré.');
+      }
+
+      sound.playFanfare();
+      setSmtpTestResult({
+        type: 'success',
+        msg: `${data.message} (ID: ${data.messageId})`,
+      });
+      fetchEmailStatus();
+    } catch (err: any) {
+      setSmtpTestResult({
+        type: 'error',
+        msg: err.message || 'Échec de l’envoi réel.',
+      });
+    } finally {
+      setIsTestingSmtp(false);
+    }
+  };
+
+  const handleGenerateApiKey = async () => {
+    setIsGeneratingKey(true);
+    sound.playClick();
+    try {
+      const res = await fetch('/api/keys/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'GeoApex Live Key',
+          scopes: ['maps:read', 'scores:write', 'duels:play'],
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.apiKey) {
+        sound.playFanfare();
+        setGeneratedKey(data.apiKey.key);
+        fetchApiKeys();
+      }
+    } finally {
+      setIsGeneratingKey(false);
+    }
+  };
+
+  const handleRevokeApiKey = async (id: string) => {
+    sound.playClick();
+    const res = await fetch('/api/keys/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (res.ok) fetchApiKeys();
+  };
+
   const handleGoogleSignIn = async () => {
     try {
       sound.playClick();
       await signInWithPopup(auth, googleAuthProvider);
-    } catch (err: any) {
-      console.error('Sign-in error:', err);
-    }
+    } catch {}
   };
 
-  // Universal sign out
   const handleSignOut = async () => {
     try {
       sound.playClick();
@@ -330,121 +686,109 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
       setEmailUser(null);
       localStorage.removeItem('geoapex_auth_user');
       localStorage.removeItem('geoapex_auth_token');
-    } catch (err) {
-      console.error('Sign-out error:', err);
-    }
+      notifyAuthUpdated();
+    } catch {}
   };
 
   const copyGitCommands = () => {
-    const cmd = `git init\ngit add .\ngit commit -m "feat: GeoApex 3D GeoGuessr clone with Cloud SQL and Firebase"\ngit branch -M main\ngit remote add origin https://github.com/VOTRE_PSEUDO/geoapex.git\ngit push -u origin main`;
+    const cmd = `git init\ngit add .\ngit commit -m "feat: GeoApex 3D GeoGuessr"\ngit branch -M main\ngit remote add origin https://github.com/VOTRE_PSEUDO/geoapex.git\ngit push -u origin main`;
     navigator.clipboard.writeText(cmd);
     sound.playClick();
     setCopiedCmd(true);
     setTimeout(() => setCopiedCmd(false), 2000);
   };
 
-  const activeUser = emailUser || (firebaseUser ? {
-    id: 0,
-    uid: firebaseUser.uid,
-    email: firebaseUser.email || '',
-    displayName: firebaseUser.displayName || 'Joueur GeoApex',
-    avatarUrl: firebaseUser.photoURL || '👑',
-    highestScore: 0,
-    gamesPlayed: 0,
-    duelsWon: 0,
-    emailVerified: 1,
-  } : null);
+  const activeUser =
+    emailUser ||
+    (firebaseUser
+      ? {
+          id: 0,
+          uid: firebaseUser.uid,
+          email: firebaseUser.email || '',
+          displayName: firebaseUser.displayName || 'Joueur GeoApex',
+          avatarUrl: firebaseUser.photoURL || '👑',
+          highestScore: 0,
+          gamesPlayed: 0,
+          duelsWon: 0,
+          emailVerified: 1,
+        }
+      : null);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-xl animate-in fade-in duration-200">
-      <div className="relative w-full max-w-2xl bg-slate-900 border border-slate-700/80 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-        {/* Header Tabs */}
-        <div className="px-6 py-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('leaderboard');
-              }}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                activeTab === 'leaderboard'
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Trophy className="w-4 h-4 text-amber-400" />
-              <span>Classement Cloud SQL</span>
-            </button>
-
-            <button
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('auth');
-              }}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                activeTab === 'auth'
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Database className="w-4 h-4 text-cyan-400" />
-              <span>Compte & Vérification Email</span>
-            </button>
-
-            <button
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('github');
-              }}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                activeTab === 'github'
-                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Github className="w-4 h-4 text-purple-400" />
-              <span>GitHub</span>
-            </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#07090F]/90">
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="relative w-full max-w-3xl bg-[#0E131D] border border-white/12 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+      >
+        {/* Modal Header Tabs */}
+        <div className="px-6 py-3.5 bg-[#07090F] border-b border-white/10 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-1.5 overflow-x-auto">
+            {[
+              { id: 'leaderboard', label: 'Classement', icon: <Trophy className="w-3.5 h-3.5 text-amber-400" /> },
+              { id: 'auth', label: 'Compte & Vérification', icon: <Database className="w-3.5 h-3.5 text-cyan-400" /> },
+              { id: 'keys', label: 'Messagerie Réelle & SMTP', icon: <Mail className="w-3.5 h-3.5 text-cyan-400" /> },
+              { id: 'github', label: 'GitHub', icon: <Github className="w-3.5 h-3.5 text-slate-300" /> },
+            ].map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => {
+                  sound.playClick();
+                  setActiveTab(t.id as any);
+                }}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  activeTab === t.id
+                    ? 'bg-cyan-400/15 text-cyan-300 border border-cyan-400/40'
+                    : 'text-slate-400 hover:text-white border border-transparent'
+                }`}
+              >
+                {t.icon}
+                <span>{t.label}</span>
+              </button>
+            ))}
           </div>
 
           <button
+            type="button"
+            aria-label="Fermer la fenêtre"
             onClick={() => {
               sound.playClick();
               onClose();
             }}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Tab 1: Cloud SQL PostgreSQL Leaderboard */}
+        {/* TAB 1: Leaderboard */}
         {activeTab === 'leaderboard' && (
           <div className="p-6 overflow-y-auto space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-black text-white">Classement Mondial (Cloud SQL)</h3>
+                <h3 className="font-display text-lg font-extrabold text-white">Classement Mondial</h3>
                 <p className="text-xs text-slate-400">
-                  Scores persistés et synchronisés en direct dans la base PostgreSQL Cloud SQL.
+                  Meilleurs scores enregistrés sur le serveur GeoApex.
                 </p>
               </div>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3" />
-                <span>PostgreSQL Connecté</span>
+              <span className="text-xs font-mono text-emerald-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Serveur Connecté</span>
               </span>
             </div>
 
             {isLoadingLeaderboard ? (
               <div className="py-12 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
                 <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
-                <span>Chargement des scores depuis Cloud SQL...</span>
+                <span>Chargement des scores...</span>
               </div>
             ) : leaderboard.length === 0 ? (
-              <div className="py-10 text-center bg-slate-950/60 rounded-2xl border border-slate-800 p-6 space-y-2">
-                <Trophy className="w-8 h-8 text-amber-400 mx-auto opacity-75" />
-                <p className="text-sm font-bold text-white">Aucun score enregistré pour l'instant</p>
+              <div className="py-10 text-center bg-[#07090F] rounded-xl border border-white/10 p-6 space-y-2">
+                <Trophy className="w-8 h-8 text-amber-400 mx-auto" />
+                <p className="text-sm font-bold text-white">Aucun score enregistré pour l’instant</p>
                 <p className="text-xs text-slate-400 max-w-sm mx-auto">
-                  Créez votre compte par email ou connectez-vous, puis terminez une partie pour inscrire votre nom sur Cloud SQL !
+                  Connectez-vous et terminez une partie pour inscrire votre record mondial.
                 </p>
               </div>
             ) : (
@@ -452,30 +796,28 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
                 {leaderboard.map((item, idx) => (
                   <div
                     key={item.id}
-                    className="flex items-center justify-between p-3 rounded-xl bg-slate-950/70 border border-slate-800"
+                    className="flex items-center justify-between p-3.5 rounded-xl bg-[#07090F] border border-white/10"
                   >
                     <div className="flex items-center gap-3">
                       <span
-                        className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs ${
+                        className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono-numbers font-bold text-xs ${
                           idx === 0
-                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
+                            ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
                             : idx === 1
-                            ? 'bg-slate-300/20 text-slate-200 border border-slate-400/50'
-                            : idx === 2
-                            ? 'bg-amber-700/20 text-amber-600 border border-amber-700/50'
-                            : 'bg-slate-800 text-slate-400'
+                            ? 'bg-slate-300/20 text-slate-200 border border-slate-400/40'
+                            : 'bg-white/5 text-slate-400'
                         }`}
                       >
                         #{idx + 1}
                       </span>
                       <div>
                         <span className="text-sm font-bold text-white block">{item.displayName}</span>
-                        <span className="text-[10px] text-slate-400">
+                        <span className="text-[11px] text-slate-400 font-mono-numbers">
                           {item.gamesPlayed} parties · {item.duelsWon} duels gagnés
                         </span>
                       </div>
                     </div>
-                    <span className="font-mono font-black text-amber-400 text-sm">
+                    <span className="font-mono-numbers font-bold text-amber-400 text-sm">
                       {item.highestScore.toLocaleString('fr-FR')} pts
                     </span>
                   </div>
@@ -485,261 +827,231 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
           </div>
         )}
 
-        {/* Tab 2: Account Creation with Real Email Verification & Cloud SQL */}
+        {/* TAB 2: Account & Real 6-Digit Email Verification */}
         {activeTab === 'auth' && (
-          <div className="p-6 overflow-y-auto space-y-5">
-            <div>
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-black text-white flex items-center gap-2">
-                  <Database className="w-5 h-5 text-cyan-400" />
-                  <span>Compte Joueur Cloud SQL</span>
-                </h3>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  PostgreSQL europe-west2
-                </span>
+          <div className="p-6 overflow-y-auto space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="font-display text-lg font-extrabold text-white">Compte Joueur &amp; Vérification</h3>
+                <p className="text-xs text-slate-400">
+                  Création de compte et réinitialisation sécurisées par code à 6 chiffres envoyé par e-mail.
+                </p>
               </div>
-              <p className="text-xs text-slate-400">
-                Créez votre compte joueur avec votre adresse email et un code de vérification officiel à 6 chiffres envoyé par e-mail.
-              </p>
+              <button
+                type="button"
+                onClick={() => setActiveTab('keys')}
+                className={`text-xs font-semibold px-2.5 py-1 rounded-lg border cursor-pointer ${
+                  emailStatus?.configured
+                    ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+                    : 'bg-amber-500/15 border-amber-500/35 text-amber-300'
+                }`}
+              >
+                {emailStatus?.configured
+                  ? `SMTP Actif (${emailStatus.provider.toUpperCase()})`
+                  : 'Configurer Gmail / Brevo'}
+              </button>
             </div>
 
-            {/* If Logged In: Show Profile */}
             {activeUser ? (
-              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-5 space-y-5">
-                <div className="flex items-center gap-4">
-                  <div className="w-16 h-16 rounded-2xl bg-cyan-500/20 border-2 border-cyan-400/60 flex items-center justify-center text-3xl shadow-lg shadow-cyan-500/20">
-                    {activeUser.avatarUrl && activeUser.avatarUrl.startsWith('http') ? (
-                      <img src={activeUser.avatarUrl} alt="Avatar" className="w-full h-full rounded-2xl object-cover" />
-                    ) : (
-                      <span>{activeUser.avatarUrl || '👑'}</span>
-                    )}
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-base font-bold text-white block">
-                        {activeUser.displayName}
-                      </span>
-                      <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold flex items-center gap-1">
-                        <Check className="w-3 h-3" />
-                        <span>Email Vérifié</span>
-                      </span>
+              <div className="bg-[#07090F] border border-white/10 rounded-xl p-5 space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-14 h-14 rounded-xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center text-2xl">
+                      {activeUser.avatarUrl?.startsWith('http') ? (
+                        <img src={activeUser.avatarUrl} alt="Avatar" className="w-full h-full rounded-xl object-cover" />
+                      ) : (
+                        <span>{activeUser.avatarUrl || '👑'}</span>
+                      )}
                     </div>
-                    <span className="text-xs text-slate-400 font-mono block">{activeUser.email}</span>
-                    <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">
-                      UID Cloud SQL: {activeUser.uid.slice(0, 16)}...
-                    </span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-bold text-white">{activeUser.displayName}</span>
+                        <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Vérifié</span>
+                        </span>
+                      </div>
+                      <span className="text-xs text-slate-400 font-mono block">{activeUser.email}</span>
+                    </div>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={handleSignOut}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0E131D] hover:bg-rose-500/15 border border-white/10 text-rose-300 text-xs font-semibold cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Déconnexion</span>
+                  </button>
                 </div>
 
-                {/* Player Cloud SQL Statistics Grid */}
-                <div className="grid grid-cols-3 gap-2.5 pt-2">
-                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 text-center">
-                    <span className="text-[10px] text-slate-400 uppercase font-semibold tracking-wider block">Record</span>
-                    <span className="text-sm font-black text-amber-400 font-mono">
-                      {activeUser.highestScore?.toLocaleString('fr-FR') || 0} pts
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-[#0E131D] p-3 rounded-xl border border-white/10 text-center">
+                    <span className="text-[11px] text-slate-400 block">Record</span>
+                    <span className="text-sm font-bold text-amber-400 font-mono-numbers">
+                      {(activeUser.highestScore || 0).toLocaleString('fr-FR')} pts
                     </span>
                   </div>
-                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 text-center">
-                    <span className="text-[10px] text-slate-400 uppercase font-semibold tracking-wider block">Parties</span>
-                    <span className="text-sm font-black text-cyan-400 font-mono">
+                  <div className="bg-[#0E131D] p-3 rounded-xl border border-white/10 text-center">
+                    <span className="text-[11px] text-slate-400 block">Parties</span>
+                    <span className="text-sm font-bold text-cyan-400 font-mono-numbers">
                       {activeUser.gamesPlayed || 0}
                     </span>
                   </div>
-                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 text-center">
-                    <span className="text-[10px] text-slate-400 uppercase font-semibold tracking-wider block">Duels Gagnés</span>
-                    <span className="text-sm font-black text-emerald-400 font-mono">
+                  <div className="bg-[#0E131D] p-3 rounded-xl border border-white/10 text-center">
+                    <span className="text-[11px] text-slate-400 block">Duels Gagnés</span>
+                    <span className="text-sm font-bold text-emerald-400 font-mono-numbers">
                       {activeUser.duelsWon || 0}
                     </span>
                   </div>
                 </div>
-
-                <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
-                  <span className="text-[11px] text-emerald-400 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Synchronisé avec PostgreSQL Cloud SQL</span>
-                  </span>
-                  <button
-                    onClick={handleSignOut}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-rose-300 text-xs font-semibold transition-colors cursor-pointer"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Se Déconnecter</span>
-                  </button>
-                </div>
               </div>
             ) : (
-              /* If Not Logged In: Email Creation / Verification Form */
               <div className="space-y-4">
-                {/* Method Switcher */}
-                <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-bold">
-                  <button
-                    onClick={() => {
-                      sound.playClick();
-                      setAuthMethod('email');
-                      setErrorMessage(null);
-                    }}
-                    className={`flex items-center justify-center gap-2 py-2 rounded-lg transition-all cursor-pointer ${
-                      authMethod === 'email'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <Mail className="w-4 h-4" />
-                    <span>Envoi Réel par Email</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      sound.playClick();
-                      setAuthMethod('google');
-                      setErrorMessage(null);
-                    }}
-                    className={`flex items-center justify-center gap-2 py-2 rounded-lg transition-all cursor-pointer ${
-                      authMethod === 'google'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <LogIn className="w-4 h-4" />
-                    <span>Google (Firebase)</span>
-                  </button>
+                <div className="grid grid-cols-4 gap-1 bg-[#07090F] p-1 rounded-xl border border-white/10 text-xs font-semibold">
+                  {[
+                    { id: 'register', label: 'Inscription', icon: <UserCheck className="w-3.5 h-3.5" /> },
+                    { id: 'login', label: 'Connexion', icon: <Lock className="w-3.5 h-3.5" /> },
+                    { id: 'reset', label: 'Mot de passe', icon: <KeyRound className="w-3.5 h-3.5" /> },
+                    { id: 'google', label: 'Google', icon: <LogIn className="w-3.5 h-3.5" /> },
+                  ].map((item) => {
+                    const isGoogle = item.id === 'google';
+                    const active = isGoogle
+                      ? authMethod === 'google'
+                      : authMethod === 'password' && accountMode === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          sound.playClick();
+                          setErrorMessage(null);
+                          setSuccessMessage(null);
+                          if (isGoogle) {
+                            setAuthMethod('google');
+                          } else {
+                            setAuthMethod('password');
+                            setAccountMode(item.id as any);
+                            if (item.id === 'register') setRegStep('form');
+                            if (item.id === 'reset') {
+                              setResetStep('request');
+                              if (emailInput) setResetEmail(emailInput);
+                            }
+                          }
+                        }}
+                        className={`flex items-center justify-center gap-1.5 py-2 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                          active ? 'bg-cyan-400 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {item.icon}
+                        <span>{item.label}</span>
+                      </button>
+                    );
+                  })}
                 </div>
 
-                {/* Notifications & Banners */}
                 {errorMessage && (
-                  <div className="p-3 bg-rose-500/20 border border-rose-500/40 rounded-xl text-xs text-rose-300 flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-                    <span>{errorMessage}</span>
+                  <div className="p-3.5 bg-rose-500/15 border border-rose-500/40 rounded-xl text-xs text-rose-200 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                    <span className="flex-1">{errorMessage}</span>
                   </div>
                 )}
 
-                {/* Success Message Banner */}
                 {successMessage && (
-                  <div className="p-3 bg-emerald-500/20 border border-emerald-500/40 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                  <div className="p-3.5 bg-emerald-500/15 border border-emerald-500/40 rounded-xl text-xs text-emerald-200 flex items-center gap-2">
                     <Check className="w-4 h-4 shrink-0 text-emerald-400" />
                     <span>{successMessage}</span>
                   </div>
                 )}
 
-                {/* Email Delivery Notification Banner */}
-                {emailDeliveryInfo && (
-                  <div className="p-4 bg-cyan-950/60 border border-cyan-500/50 rounded-2xl text-xs text-cyan-200 space-y-2.5 shadow-lg">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <Send className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-                        <div>
-                          <span className="font-bold text-white block">
-                            {emailDeliveryInfo.isRealSmtp
-                              ? 'E-mail envoyé dans votre boîte de réception !'
-                              : 'E-mail officiel généré et prêt !'}
-                          </span>
-                          <span className="text-[11px] text-cyan-300/80">
-                            {emailDeliveryInfo.isRealSmtp
-                              ? 'Consultez vos e-mails (et vos spams si nécessaire).'
-                              : 'Vous pouvez visualiser l’e-mail réel en direct ou utiliser le code.'}
-                          </span>
-                        </div>
-                      </div>
-
-                      {receivedCodeBanner && (
-                        <div className="text-right">
-                          <span className="text-[10px] text-slate-400 block font-mono">CODE :</span>
-                          <span className="font-mono font-black text-amber-300 text-lg tracking-widest">
-                            {receivedCodeBanner}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-cyan-800/40">
-                      {emailDeliveryInfo.previewUrl && (
-                        <a
-                          href={emailDeliveryInfo.previewUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs transition-colors cursor-pointer"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>Ouvrir l’e-mail reçu (HTML complet)</span>
-                        </a>
-                      )}
-
-                      {receivedCodeBanner && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            sound.playClick();
-                            setCodeInput(receivedCodeBanner);
-                          }}
-                          className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-semibold border border-cyan-500/40 text-xs cursor-pointer"
-                        >
-                          Remplir automatiquement
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* EMAIL & CODE VERIFICATION FLOW */}
-                {authMethod === 'email' && (
-                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-                    {emailStep === 'enter_email' ? (
-                      <form onSubmit={handleSendCode} className="space-y-4">
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-bold text-slate-300 flex items-center justify-between">
-                            <span className="flex items-center gap-1.5">
-                              <Mail className="w-3.5 h-3.5 text-cyan-400" />
-                              <span>Votre Adresse Email Personnelle</span>
-                            </span>
-                            {smtpStatus?.configured ? (
-                              <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-mono">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                                <span>SMTP Actif ({smtpStatus.user})</span>
-                              </span>
-                            ) : null}
+                {/* Register 2-step Real Website Flow */}
+                {authMethod === 'password' && accountMode === 'register' && (
+                  <div className="bg-[#07090F] border border-white/10 rounded-xl p-5">
+                    {regStep === 'form' ? (
+                      <form onSubmit={handleRequestRegisterCode} className="space-y-3.5">
+                        <div className="space-y-1">
+                          <label htmlFor="reg-email" className="text-xs font-bold text-slate-200 block">
+                            Adresse E-mail
                           </label>
                           <input
+                            id="reg-email"
                             type="email"
                             required
-                            placeholder="ex: alexandre.soeirofrance@gmail.com"
+                            placeholder="votre.email@gmail.com"
                             value={emailInput}
                             onChange={(e) => setEmailInput(e.target.value)}
-                            className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none focus:border-cyan-400 transition-colors"
+                            className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-cyan-400 focus:outline-none"
                           />
                         </div>
 
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                            <UserCheck className="w-3.5 h-3.5 text-cyan-400" />
-                            <span>Pseudo / Nom de Joueur (Optionnel)</span>
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="ex: AlexandreMaster"
-                            value={displayNameInput}
-                            onChange={(e) => setDisplayNameInput(e.target.value)}
-                            className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none focus:border-cyan-400 transition-colors"
-                          />
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <div className="flex items-center justify-between">
+                              <label htmlFor="reg-pass" className="text-xs font-bold text-slate-200">
+                                Mot de passe
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => setShowPassword(!showPassword)}
+                                className="text-[11px] text-cyan-400 hover:underline cursor-pointer"
+                              >
+                                {showPassword ? 'Masquer' : 'Afficher'}
+                              </button>
+                            </div>
+                            <input
+                              id="reg-pass"
+                              type={showPassword ? 'text' : 'password'}
+                              required
+                              minLength={6}
+                              placeholder="Min. 6 caractères"
+                              value={accountPassword}
+                              onChange={(e) => setAccountPassword(e.target.value)}
+                              className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <label htmlFor="reg-pass-confirm" className="text-xs font-bold text-slate-200 block">
+                              Confirmer mot de passe
+                            </label>
+                            <input
+                              id="reg-pass-confirm"
+                              type={showPassword ? 'text' : 'password'}
+                              required
+                              minLength={6}
+                              placeholder="Répéter le mot de passe"
+                              value={confirmPassword}
+                              onChange={(e) => setConfirmPassword(e.target.value)}
+                              className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                            />
+                          </div>
                         </div>
 
-                        {/* Avatar Picker */}
-                        <div className="space-y-1.5">
-                          <label className="text-xs font-bold text-slate-300 block">
-                            Choisissez votre Avatar
-                          </label>
-                          <div className="flex flex-wrap gap-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                          <div className="space-y-1">
+                            <label htmlFor="reg-pseudo" className="text-xs font-bold text-slate-200 block">
+                              Pseudo Joueur
+                            </label>
+                            <input
+                              id="reg-pseudo"
+                              type="text"
+                              placeholder="ex: Alexandre"
+                              value={displayNameInput}
+                              onChange={(e) => setDisplayNameInput(e.target.value)}
+                              className="w-full px-3.5 py-2 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="flex flex-wrap gap-1.5">
                             {AVATAR_OPTIONS.map((emoji) => (
                               <button
                                 key={emoji}
                                 type="button"
-                                onClick={() => {
-                                  sound.playClick();
-                                  setSelectedAvatar(emoji);
-                                }}
-                                className={`w-10 h-10 rounded-xl text-xl flex items-center justify-center transition-all cursor-pointer ${
+                                onClick={() => setSelectedAvatar(emoji)}
+                                className={`w-9 h-9 rounded-lg text-base flex items-center justify-center cursor-pointer border ${
                                   selectedAvatar === emoji
-                                    ? 'bg-cyan-500/30 border-2 border-cyan-400 scale-110 shadow-md'
-                                    : 'bg-slate-900 border border-slate-800 hover:border-slate-700'
+                                    ? 'bg-cyan-400/20 border-cyan-400'
+                                    : 'bg-[#0E131D] border-white/10'
                                 }`}
                               >
                                 {emoji}
@@ -751,208 +1063,262 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
                         <button
                           type="submit"
                           disabled={isSubmitting}
-                          className="w-full py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50 text-white font-bold text-xs tracking-wider uppercase shadow-lg shadow-cyan-500/25 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                          className="w-full py-3 rounded-xl bg-cyan-400 hover:bg-cyan-300 disabled:opacity-50 text-slate-950 font-bold text-xs tracking-wide cursor-pointer flex items-center justify-center gap-2"
                         >
-                          {isSubmitting ? (
-                            <>
-                              <RefreshCw className="w-4 h-4 animate-spin" />
-                              <span>Envoi de l'e-mail en cours...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Send className="w-4 h-4" />
-                              <span>Envoyer le code par E-mail</span>
-                              <ArrowRight className="w-4 h-4" />
-                            </>
-                          )}
+                          <Send className="w-4 h-4" />
+                          <span>{isSubmitting ? 'Envoi du code...' : 'Créer le compte & recevoir le code'}</span>
                         </button>
                       </form>
                     ) : (
-                      /* STEP 2: ENTER 6-DIGIT CODE */
-                      <form onSubmit={handleVerifyCode} className="space-y-4">
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                              <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
-                              <span>Code de vérification reçu (6 chiffres)</span>
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                sound.playClick();
-                                setEmailStep('enter_email');
-                              }}
-                              className="text-[11px] text-slate-400 hover:text-cyan-300 underline cursor-pointer"
-                            >
-                              Changer d'email
-                            </button>
-                          </div>
-                          <input
-                            type="text"
-                            required
-                            maxLength={6}
-                            placeholder="123456"
-                            value={codeInput}
-                            onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, ''))}
-                            className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-cyan-500/50 text-xl font-mono tracking-widest text-center text-white focus:outline-none focus:border-cyan-400 shadow-inner"
-                          />
-                          <p className="text-[11px] text-slate-400 text-center">
-                            Code envoyé pour <span className="text-cyan-300 font-mono">{emailInput}</span> (valable 15 min).
-                          </p>
-                        </div>
-
-                        <div className="flex gap-2">
+                      <form onSubmit={handleConfirmRegisterCode} className="space-y-4">
+                        <div className="flex items-center justify-between text-xs">
                           <button
                             type="button"
-                            onClick={handleSendCode}
-                            disabled={isSubmitting}
-                            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
+                            onClick={() => {
+                              setRegStep('form');
+                              setErrorMessage(null);
+                            }}
+                            className="flex items-center gap-1 text-slate-400 hover:text-white cursor-pointer"
                           >
-                            <RefreshCw className="w-3.5 h-3.5" />
-                            <span>Renvoyer l'e-mail</span>
+                            <ArrowLeft className="w-3.5 h-3.5" />
+                            <span>Modifier l’adresse</span>
                           </button>
-
-                          <button
-                            type="submit"
-                            disabled={isSubmitting}
-                            className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 disabled:opacity-50 text-white font-bold text-xs tracking-wider uppercase shadow-lg shadow-emerald-500/25 transition-all flex items-center justify-center gap-2 cursor-pointer"
-                          >
-                            {isSubmitting ? (
-                              <>
-                                <RefreshCw className="w-4 h-4 animate-spin" />
-                                <span>Vérification...</span>
-                              </>
-                            ) : (
-                              <>
-                                <ShieldCheck className="w-4 h-4" />
-                                <span>Valider et Activer mon Compte</span>
-                              </>
-                            )}
-                          </button>
+                          <span className="font-mono text-cyan-300">{emailInput}</span>
                         </div>
-                      </form>
-                    )}
 
-                    {/* Collapsible SMTP / Direct Gmail Dispatch Configuration */}
-                    <div className="pt-2 border-t border-slate-800">
-                      <button
-                        type="button"
-                        onClick={() => setShowSmtpConfig(!showSmtpConfig)}
-                        className="w-full flex items-center justify-between text-xs text-slate-400 hover:text-slate-200 transition-colors py-1 cursor-pointer"
-                      >
-                        <span className="flex items-center gap-1.5">
-                          <Settings className="w-3.5 h-3.5 text-cyan-400" />
-                          <span className="font-semibold">
-                            {smtpStatus?.configured
-                              ? 'Serveur d’envoi SMTP configuré (Modifier)'
-                              : 'Configurer l’envoi direct vers ma boîte Gmail (SMTP)'}
-                          </span>
-                        </span>
-                        <span className="text-[10px] text-cyan-400 underline">
-                          {showSmtpConfig ? 'Masquer' : 'Afficher'}
-                        </span>
-                      </button>
-
-                      {showSmtpConfig && (
-                        <div className="mt-3 p-4 bg-slate-900/90 border border-slate-800 rounded-xl space-y-3">
-                          <div className="text-[11px] text-slate-300 space-y-1">
-                            <p className="font-bold text-white flex items-center gap-1">
-                              <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
-                              <span>Comment recevoir directement dans votre boîte Gmail ?</span>
-                            </p>
-                            <p className="text-slate-400 leading-relaxed">
-                              Google requiert un <strong>Mot de passe d'application</strong> (16 caractères) pour autoriser l'envoi d'e-mails sécurisé.
-                            </p>
-                            <a
-                              href="https://myaccount.google.com/apppasswords"
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-cyan-400 hover:underline font-mono text-[11px] mt-1"
+                        <div className="p-3.5 rounded-xl bg-[#0E131D] border border-white/10 space-y-2 text-xs">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-white">Vérification par e-mail</span>
+                            <span
+                              className={`font-semibold ${
+                                lastDispatchedEmail?.deliveredToRealInbox ? 'text-emerald-400' : 'text-amber-300'
+                              }`}
                             >
-                              <span>Ouvrir Google App Passwords</span>
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
+                              {lastDispatchedEmail?.deliveredToRealInbox
+                                ? `Livré en boîte réelle (${String(lastDispatchedEmail.relayType).toUpperCase()})`
+                                : 'Relais réel non configuré (Aperçu Ethereal)'}
+                            </span>
                           </div>
 
-                          <form onSubmit={handleSaveSmtp} className="space-y-2.5 pt-1">
-                            <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
-                                Votre adresse Gmail expéditrice
-                              </label>
-                              <input
-                                type="email"
-                                required
-                                placeholder="mon.adresse@gmail.com"
-                                value={smtpEmailInput}
-                                onChange={(e) => setSmtpEmailInput(e.target.value)}
-                                className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-cyan-400"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
-                                Mot de passe d'application Google (16 lettres)
-                              </label>
-                              <input
-                                type="password"
-                                required
-                                placeholder="abcd efgh ijkl mnop"
-                                value={smtpPasswordInput}
-                                onChange={(e) => setSmtpPasswordInput(e.target.value)}
-                                className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-cyan-400"
-                              />
-                            </div>
-
-                            {smtpFeedback && (
-                              <p
-                                className={`text-[11px] font-semibold ${
-                                  smtpFeedback.type === 'success' ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                              >
-                                {smtpFeedback.msg}
-                              </p>
-                            )}
-
-                            <button
-                              type="submit"
-                              disabled={smtpSaving}
-                              className="w-full py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-                            >
-                              {smtpSaving ? (
-                                <>
-                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                  <span>Enregistrement...</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Check className="w-3.5 h-3.5" />
-                                  <span>Enregistrer et Activer l'envoi Gmail</span>
-                                </>
+                          {!lastDispatchedEmail?.deliveredToRealInbox && (
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                              {lastDispatchedEmail?.previewUrl && (
+                                <a
+                                  href={lastDispatchedEmail.previewUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-semibold flex items-center gap-1.5"
+                                >
+                                  <span>Voir le mail reçu (Ethereal)</span>
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                </a>
                               )}
-                            </button>
-                          </form>
+                              <button
+                                type="button"
+                                onClick={() => setActiveTab('keys')}
+                                className="px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-400/40 text-amber-200 font-semibold cursor-pointer"
+                              >
+                                Configurer Gmail / Brevo sur le serveur
+                              </button>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
+
+                        <div className="space-y-2">
+                          <label htmlFor="reg-otp-0" className="text-xs font-bold text-slate-200 block">
+                            Entrez le code de confirmation à 6 chiffres
+                          </label>
+                          <OtpSixBoxInput
+                            idPrefix="reg-otp"
+                            value={regCodeInput}
+                            onChange={setRegCodeInput}
+                            accent="cyan"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between text-xs pt-1">
+                          <span className="text-slate-400">Vous n’avez pas reçu le mail ?</span>
+                          <button
+                            type="button"
+                            disabled={resendCooldown > 0 || isSubmitting}
+                            onClick={dispatchRegistrationCode}
+                            className="font-semibold text-cyan-300 hover:text-cyan-200 disabled:text-slate-500 cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            {resendCooldown > 0 ? `Renvoyer dans ${resendCooldown}s` : 'Renvoyer le code'}
+                          </button>
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={isSubmitting || regCodeInput.length < 6}
+                          className="w-full py-3 rounded-xl bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 text-slate-950 font-bold text-xs cursor-pointer flex items-center justify-center gap-2"
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>{isSubmitting ? 'Vérification...' : 'Vérifier et activer le compte'}</span>
+                        </button>
+                      </form>
+                    )}
                   </div>
                 )}
 
-                {/* GOOGLE FIREBASE AUTH OPTION */}
-                {authMethod === 'google' && (
-                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-6 text-center space-y-4">
-                    <div className="w-12 h-12 rounded-2xl bg-cyan-500/20 border border-cyan-400/40 flex items-center justify-center mx-auto text-cyan-300">
-                      <LogIn className="w-6 h-6" />
+                {/* Login */}
+                {authMethod === 'password' && accountMode === 'login' && (
+                  <form onSubmit={handleLoginWithPassword} className="bg-[#07090F] border border-white/10 rounded-xl p-5 space-y-3.5">
+                    <div className="space-y-1">
+                      <label htmlFor="login-email" className="text-xs font-bold text-slate-200 block">
+                        Adresse E-mail
+                      </label>
+                      <input
+                        id="login-email"
+                        type="email"
+                        required
+                        placeholder="votre.email@gmail.com"
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                      />
                     </div>
-                    <div>
-                      <h4 className="text-sm font-bold text-white mb-1">Connexion Google en 1 clic</h4>
-                      <p className="text-xs text-slate-400 max-w-md mx-auto">
-                        Identifiez-vous instantanément avec votre compte Google et synchronisez vos parties avec Cloud SQL.
-                      </p>
+
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="login-pass" className="text-xs font-bold text-slate-200">
+                          Mot de passe
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAccountMode('reset');
+                            setResetStep('request');
+                            if (emailInput) setResetEmail(emailInput);
+                          }}
+                          className="text-[11px] text-cyan-400 hover:underline cursor-pointer"
+                        >
+                          Mot de passe oublié ?
+                        </button>
+                      </div>
+                      <input
+                        id="login-pass"
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        placeholder="Votre mot de passe"
+                        value={accountPassword}
+                        onChange={(e) => setAccountPassword(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                      />
                     </div>
 
                     <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full py-3 rounded-xl bg-cyan-400 hover:bg-cyan-300 disabled:opacity-50 text-slate-950 font-bold text-xs cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <span>{isSubmitting ? 'Connexion...' : 'Se Connecter'}</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  </form>
+                )}
+
+                {/* Reset Password with 6-digit OTP */}
+                {authMethod === 'password' && accountMode === 'reset' && (
+                  <div className="bg-[#07090F] border border-white/10 rounded-xl p-5">
+                    {resetStep === 'request' ? (
+                      <form onSubmit={handleRequestResetCode} className="space-y-3.5">
+                        <div className="space-y-1">
+                          <label htmlFor="reset-email" className="text-xs font-bold text-slate-200 block">
+                            Adresse E-mail du compte
+                          </label>
+                          <input
+                            id="reset-email"
+                            type="email"
+                            required
+                            placeholder="votre.email@gmail.com"
+                            value={resetEmail}
+                            onChange={(e) => setResetEmail(e.target.value)}
+                            className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:border-amber-400 focus:outline-none"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={isSubmitting}
+                          className="w-full py-3 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 font-bold text-xs cursor-pointer"
+                        >
+                          {isSubmitting ? 'Envoi...' : 'Recevoir le code de réinitialisation'}
+                        </button>
+                      </form>
+                    ) : (
+                      <form onSubmit={handleConfirmResetCode} className="space-y-3.5">
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label htmlFor="reset-otp-0" className="text-xs font-bold text-slate-200">
+                              Code à 6 chiffres reçu par e-mail
+                            </label>
+                            <button
+                              type="button"
+                              disabled={resendCooldown > 0 || isSubmitting}
+                              onClick={dispatchResetCode}
+                              className="text-xs font-semibold text-amber-300 disabled:text-slate-500 cursor-pointer"
+                            >
+                              {resendCooldown > 0 ? `Renvoyer (${resendCooldown}s)` : 'Renvoyer'}
+                            </button>
+                          </div>
+                          <OtpSixBoxInput
+                            idPrefix="reset-otp"
+                            value={resetCode}
+                            onChange={setResetCode}
+                            accent="amber"
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <input
+                            type={showResetPassword ? 'text' : 'password'}
+                            required
+                            minLength={6}
+                            placeholder="Nouveau mot de passe"
+                            value={resetPassword}
+                            onChange={(e) => setResetPassword(e.target.value)}
+                            className="w-full px-3.5 py-2 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:outline-none"
+                          />
+                          <input
+                            type={showResetPassword ? 'text' : 'password'}
+                            required
+                            minLength={6}
+                            placeholder="Confirmer"
+                            value={resetConfirmPassword}
+                            onChange={(e) => setResetConfirmPassword(e.target.value)}
+                            className="w-full px-3.5 py-2 rounded-xl bg-[#0E131D] border border-white/15 text-sm text-white focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={() => setShowResetPassword(!showResetPassword)}
+                            className="text-[11px] text-amber-300 hover:underline cursor-pointer"
+                          >
+                            {showResetPassword ? 'Masquer mots de passe' : 'Afficher mots de passe'}
+                          </button>
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={isSubmitting || resetCode.length < 6}
+                          className="w-full py-3 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 font-bold text-xs cursor-pointer"
+                        >
+                          Valider le nouveau mot de passe
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                )}
+
+                {/* Google Sign In */}
+                {authMethod === 'google' && (
+                  <div className="bg-[#07090F] border border-white/10 rounded-xl p-6 text-center space-y-3">
+                    <p className="text-xs text-slate-300">
+                      Identifiez-vous instantanément avec votre compte Google.
+                    </p>
+                    <button
+                      type="button"
                       onClick={handleGoogleSignIn}
-                      className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs tracking-wide shadow-lg shadow-cyan-500/25 active:scale-95 transition-all cursor-pointer"
+                      className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-xs cursor-pointer"
                     >
                       <LogIn className="w-4 h-4" />
                       <span>Continuer avec Google</span>
@@ -964,61 +1330,369 @@ export function AuthAndCloudModal({ isOpen, onClose, defaultTab = 'leaderboard' 
           </div>
         )}
 
-        {/* Tab 3: GitHub Export Instructions */}
-        {activeTab === 'github' && (
-          <div className="p-6 space-y-5">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-2xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300">
-                <Github className="w-5 h-5" />
-              </div>
+        {/* TAB 3: Real Inbox Email Wizard & API Keys */}
+        {activeTab === 'keys' && (
+          <div className="p-6 overflow-y-auto space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="text-lg font-black text-white">Mettre sur GitHub</h3>
+                <h3 className="font-display text-lg font-extrabold text-white">
+                  Messagerie Réelle (Gmail / Brevo / Resend / SMTP)
+                </h3>
                 <p className="text-xs text-slate-400">
-                  Liez ce projet complet (React 19 + Express + Leaflet + Cloud SQL + Firebase) à votre compte GitHub.
+                  Configurez votre serveur SMTP pour envoyer les codes de vérification et bilans directement en boîte Gmail.
                 </p>
               </div>
+              <span
+                className={`text-xs font-semibold px-3 py-1 rounded-lg border ${
+                  emailStatus?.configured
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                    : 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                }`}
+              >
+                {emailStatus?.configured
+                  ? `Actif : ${emailStatus.provider.toUpperCase()}`
+                  : 'Aperçu Ethereal (non livré en boîte Gmail)'}
+              </span>
             </div>
 
-            <div className="space-y-3">
-              <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-slate-300 font-mono">1. Créez un dépôt sur GitHub</span>
-                  <a
-                    href="https://github.com/new"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1 text-cyan-400 hover:underline text-[11px]"
+            <form
+              onSubmit={handleSaveEmailConfiguration}
+              className="bg-[#07090F] border border-white/10 rounded-xl p-5 space-y-4"
+            >
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-[#0E131D] p-1 rounded-xl border border-white/10 text-xs font-semibold">
+                {[
+                  { id: 'gmail', label: 'Gmail App Pass' },
+                  { id: 'brevo', label: 'Brevo API' },
+                  { id: 'resend', label: 'Resend API' },
+                  { id: 'smtp', label: 'SMTP Libre' },
+                ].map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      sound.playClick();
+                      setProviderTab(p.id as any);
+                      setSmtpTestResult(null);
+                    }}
+                    className={`py-2 px-2 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                      providerTab === p.id
+                        ? 'bg-cyan-400 text-slate-950 font-bold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
                   >
-                    <span>Ouvrir github.com/new</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-                <p className="text-[11px] text-slate-400">
-                  Nommez votre dépôt (ex : <code className="text-cyan-300">geoapex</code>) sans cocher 'Initialize with README'.
-                </p>
+                    {p.label}
+                  </button>
+                ))}
               </div>
 
-              <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-300 font-mono">2. Commandes Git pour pousser le code</span>
+              {providerTab === 'gmail' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs text-slate-300">
+                    <span>Utilisez un Mot de passe d’application Google (16 caractères)</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAppPasswordHelp(!showAppPasswordHelp)}
+                      className="text-cyan-400 hover:underline cursor-pointer"
+                    >
+                      {showAppPasswordHelp ? 'Masquer aide' : 'Comment obtenir ?'}
+                    </button>
+                  </div>
+                  {showAppPasswordHelp && (
+                    <div className="p-3 rounded-lg bg-[#0E131D] border border-white/10 text-[11px] text-slate-300 space-y-1">
+                      <p>1. Ouvrez <strong>myaccount.google.com/apppasswords</strong> (Validation en 2 étapes requise).</p>
+                      <p>2. Créez une application « GeoApex » et copiez les 16 caractères générés.</p>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="cfg-gmail-user" className="text-xs font-semibold text-slate-300 block mb-1">
+                        Compte Gmail expéditeur
+                      </label>
+                      <input
+                        id="cfg-gmail-user"
+                        type="email"
+                        value={cfgEmailUser}
+                        onChange={(e) => {
+                          setCfgEmailUser(e.target.value);
+                          setCfgFromEmail(e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="cfg-gmail-pass" className="text-xs font-semibold text-slate-300 block mb-1">
+                        Mot de passe d’application (16 lettres)
+                      </label>
+                      <input
+                        id="cfg-gmail-pass"
+                        type="password"
+                        value={cfgAppPassword}
+                        onChange={(e) => setCfgAppPassword(e.target.value)}
+                        placeholder="abcd efgh ijkl mnop"
+                        className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white font-mono focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {providerTab === 'brevo' && (
+                <div className="space-y-3">
+                  <p className="text-xs text-slate-300">
+                    Brevo offre 300 e-mails/jour gratuits sans domaine dédié (clé API v3).
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="cfg-brevo-key" className="text-xs font-semibold text-slate-300 block mb-1">
+                        Clé API Brevo
+                      </label>
+                      <input
+                        id="cfg-brevo-key"
+                        type="password"
+                        value={cfgBrevoKey}
+                        onChange={(e) => setCfgBrevoKey(e.target.value)}
+                        placeholder="xkeysib-..."
+                        className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white font-mono focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="cfg-brevo-from" className="text-xs font-semibold text-slate-300 block mb-1">
+                        E-mail expéditeur vérifié
+                      </label>
+                      <input
+                        id="cfg-brevo-from"
+                        type="email"
+                        value={cfgFromEmail}
+                        onChange={(e) => setCfgFromEmail(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {providerTab === 'resend' && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="cfg-resend-key" className="text-xs font-semibold text-slate-300 block mb-1">
+                        Clé API Resend
+                      </label>
+                      <input
+                        id="cfg-resend-key"
+                        type="password"
+                        value={cfgResendKey}
+                        onChange={(e) => setCfgResendKey(e.target.value)}
+                        placeholder="re_..."
+                        className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white font-mono focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="cfg-resend-from" className="text-xs font-semibold text-slate-300 block mb-1">
+                        Expéditeur (ou onboarding@resend.dev)
+                      </label>
+                      <input
+                        id="cfg-resend-from"
+                        type="email"
+                        value={cfgFromEmail}
+                        onChange={(e) => setCfgFromEmail(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:border-cyan-400 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {providerTab === 'smtp' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="cfg-smtp-host" className="text-xs font-semibold text-slate-300 block mb-1">
+                      Hôte SMTP
+                    </label>
+                    <input
+                      id="cfg-smtp-host"
+                      type="text"
+                      value={cfgSmtpHost}
+                      onChange={(e) => setCfgSmtpHost(e.target.value)}
+                      placeholder="smtp-relay.brevo.com"
+                      className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="cfg-smtp-port" className="text-xs font-semibold text-slate-300 block mb-1">
+                      Port (587 ou 465)
+                    </label>
+                    <input
+                      id="cfg-smtp-port"
+                      type="number"
+                      value={cfgSmtpPort}
+                      onChange={(e) => setCfgSmtpPort(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="cfg-smtp-user" className="text-xs font-semibold text-slate-300 block mb-1">
+                      Utilisateur SMTP
+                    </label>
+                    <input
+                      id="cfg-smtp-user"
+                      type="text"
+                      value={cfgEmailUser}
+                      onChange={(e) => setCfgEmailUser(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="cfg-smtp-pass" className="text-xs font-semibold text-slate-300 block mb-1">
+                      Mot de passe SMTP
+                    </label>
+                    <input
+                      id="cfg-smtp-pass"
+                      type="password"
+                      value={cfgAppPassword}
+                      onChange={(e) => setCfgAppPassword(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-[#0E131D] border border-white/15 text-xs text-white focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-white/10 space-y-2.5">
+                <label htmlFor="cfg-test-recipient" className="text-xs font-semibold text-slate-300 block">
+                  Boîte e-mail de test
+                </label>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    id="cfg-test-recipient"
+                    type="email"
+                    value={smtpTestRecipient}
+                    onChange={(e) => setSmtpTestRecipient(e.target.value)}
+                    placeholder="alexandre.soeirofrance@gmail.com"
+                    className="flex-1 px-3.5 py-2 rounded-xl bg-[#0E131D] border border-white/15 text-xs text-white font-mono focus:border-cyan-400 focus:outline-none"
+                  />
                   <button
-                    onClick={copyGitCommands}
-                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-cyan-300 transition-colors cursor-pointer"
+                    type="submit"
+                    disabled={isSavingEmailCfg}
+                    className="px-4 py-2 rounded-xl bg-cyan-400 hover:bg-cyan-300 disabled:opacity-50 text-slate-950 font-bold text-xs cursor-pointer whitespace-nowrap"
                   >
-                    {copiedCmd ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedCmd ? 'Copié !' : 'Copier'}</span>
+                    {isSavingEmailCfg ? 'Validation...' : 'Enregistrer & Envoyer Test'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isTestingSmtp}
+                    onClick={handleTestLiveEmail}
+                    className="px-4 py-2 rounded-xl bg-[#0E131D] hover:bg-white/10 border border-white/15 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
+                  >
+                    {isTestingSmtp ? 'Test...' : 'Tester Relais Actuel'}
                   </button>
                 </div>
+              </div>
 
-                <pre className="p-3 bg-slate-900 rounded-xl text-[11px] font-mono text-slate-200 overflow-x-auto leading-relaxed border border-slate-800">
+              {smtpTestResult && (
+                <div
+                  className={`p-3 rounded-xl text-xs border ${
+                    smtpTestResult.type === 'success'
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                  }`}
+                >
+                  {smtpTestResult.msg}
+                </div>
+              )}
+            </form>
+
+            {/* Developer API Keys */}
+            <div className="bg-[#07090F] border border-white/10 rounded-xl p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-bold text-white">
+                  <Terminal className="w-4 h-4 text-amber-400" />
+                  <span>Clés API Développeur ({apiKeys.length})</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGenerateApiKey}
+                  disabled={isGeneratingKey}
+                  className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs cursor-pointer"
+                >
+                  {isGeneratingKey ? 'Génération...' : 'Générer une Clé'}
+                </button>
+              </div>
+
+              {generatedKey && (
+                <div className="p-3 bg-amber-500/10 border border-amber-400/40 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between text-xs text-amber-200 font-semibold">
+                    <span>Copiez cette clé maintenant :</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(generatedKey);
+                        setCopiedKey(true);
+                        setTimeout(() => setCopiedKey(false), 2000);
+                      }}
+                      className="px-2.5 py-1 rounded bg-amber-400 text-slate-950 font-bold cursor-pointer"
+                    >
+                      {copiedKey ? 'Copié' : 'Copier'}
+                    </button>
+                  </div>
+                  <pre className="p-2 bg-[#07090F] rounded text-xs font-mono text-amber-200 overflow-x-auto">
+                    {generatedKey}
+                  </pre>
+                </div>
+              )}
+
+              {apiKeys.length > 0 && (
+                <div className="space-y-1.5">
+                  {apiKeys.map((k) => (
+                    <div
+                      key={k.id}
+                      className="p-2.5 bg-[#0E131D] border border-white/10 rounded-lg flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <span className="font-semibold text-white">{k.name}</span>
+                        <span className="text-slate-400 font-mono ml-2">{k.maskedKey}</span>
+                      </div>
+                      {k.status === 'active' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRevokeApiKey(k.id)}
+                          aria-label={`Révoquer la clé ${k.name}`}
+                          className="p-1.5 rounded text-rose-300 hover:bg-rose-500/15 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: GitHub Export */}
+        {activeTab === 'github' && (
+          <div className="p-6 space-y-4">
+            <h3 className="font-display text-lg font-extrabold text-white">Exporter vers GitHub</h3>
+            <div className="bg-[#07090F] p-4 rounded-xl border border-white/10 space-y-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-slate-200">Commandes Git</span>
+                <button
+                  type="button"
+                  onClick={copyGitCommands}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#0E131D] border border-white/10 text-xs font-semibold text-cyan-300 cursor-pointer"
+                >
+                  {copiedCmd ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedCmd ? 'Copié' : 'Copier'}</span>
+                </button>
+              </div>
+              <pre className="p-3 bg-[#0E131D] rounded-lg text-[11px] font-mono text-slate-200 overflow-x-auto border border-white/10">
 {`git init
 git add .
-git commit -m "feat: GeoApex 3D GeoGuessr with Cloud SQL and Firebase"
+git commit -m "feat: GeoApex 3D GeoGuessr"
 git branch -M main
 git remote add origin https://github.com/VOTRE_PSEUDO/geoapex.git
 git push -u origin main`}
-                </pre>
-              </div>
+              </pre>
             </div>
           </div>
         )}

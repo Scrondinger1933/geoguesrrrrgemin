@@ -1,0 +1,9 @@
+{
+  "verify_test_1794507731177@example.com": {
+    "email": "verify_test_1794507731177@example.com",
+    "passwordHash": "b71d6c16c17ffa5d2df15d50fd72127c:1ab57adebd5550da2f33f03ccc91c2e4c83b5f42bf9b09dc505af333e227f2dc6bab7f43342715e67cb67e4cc3f114770d9a97fcf9a8ee1f449d24788b3e0e14",
+    "displayName": "TestVerify",
+    "avatarUrl": "👑",
+    "createdAt": 1794507731301
+  }
+}

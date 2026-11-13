@@ -1,0 +1,16 @@
+[
+  {
+    "id": "key_88c89ca1327e",
+    "name": "Client Mobile GeoApex",
+    "prefix": "gapx_live",
+    "maskedKey": "gapx_live_c63a••••••••••••••••f1f6",
+    "scopes": [
+      "maps:read",
+      "scores:write",
+      "duels:play"
+    ],
+    "createdAt": "2026-11-09T15:47:04.710Z",
+    "expiresAt": "2027-11-09T15:47:04.710Z",
+    "status": "active"
+  }
+]
